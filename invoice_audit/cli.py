@@ -22,6 +22,8 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("audit", help="audit a folder of invoice scans")
     a.add_argument("scans_dir", type=Path)
     a.add_argument("--pricebook", type=Path, required=True)
+    a.add_argument("--floor", type=Path, default=None,
+                   help="taught vendor/domain rules (JSON) — symbolic veto layer")
     a.add_argument("--tolerance", type=float, default=0.15)
     a.add_argument("--out", type=Path, default=None)
 
@@ -34,13 +36,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "audit":
             receipt = audit_folder(args.scans_dir, args.pricebook,
-                                   tolerance=args.tolerance)
+                                   tolerance=args.tolerance,
+                                   floor_path=args.floor)
             out = args.out or (args.scans_dir / "audit-receipt.json")
             out.write_text(json.dumps(receipt, indent=2, sort_keys=True))
             t = receipt["totals"]
             print(f"invoices={t['invoices']} lines={t['linesChecked']} "
                   f"flagged={t['flagged']} "
-                  f"potentialOverchargeUSD={t['potentialOverchargeUSD']:.2f}")
+                  f"potentialOverchargeUSD={t['potentialOverchargeUSD']:.2f} "
+                  f"policyOverageUSD={t['policyOverageUSD']:.2f}")
             for item in receipt["reviewQueue"]:
                 print(f"  REVIEW [{item['kind']}] {item['invoice']}"
                       f" line={item.get('line')} — {item['detail']}")

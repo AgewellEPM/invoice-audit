@@ -1,0 +1,27 @@
+{
+  "schema": "invoice-audit.floor.v1",
+  "note": "Human-taught vendor/domain rules. These VETO a line the price history cannot judge. Each rule carries WHO taught it and WHY — provenance is mandatory and is hashed into the signed receipt.",
+  "rules": [
+    {
+      "subject": "SEN-7781",
+      "relation_type": "max_unit_price",
+      "object": "60.00",
+      "source": "ops:purchasing-manager",
+      "evidence": "Proximity sensors (HD) have been quoted $45-55/unit by three vendors in 2025-2026; we never approve above $60. No price history is on file yet, so only a human rule catches an overcharge here."
+    },
+    {
+      "subject": "*",
+      "relation_type": "unit_price_positive",
+      "object": "0",
+      "source": "seed:invariant",
+      "evidence": "A charged unit price must be greater than zero; a non-positive unit price is a misread or a bad line, never a real charge."
+    },
+    {
+      "subject": "*",
+      "relation_type": "qty_integer",
+      "object": "true",
+      "source": "seed:invariant",
+      "evidence": "Discrete goods (pumps, kits, sensors, bundles) ship in whole units; a fractional quantity indicates an extraction error."
+    }
+  ]
+}

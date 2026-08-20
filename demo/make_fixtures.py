@@ -17,7 +17,23 @@ from PIL import Image, ImageDraw, ImageFont
 
 HERE = Path(__file__).resolve().parent
 SCANS = HERE / "scans"
-FONT = "/System/Library/Fonts/Menlo.ttc"
+
+# Monospaced font, resolved cross-platform (macOS / Windows / Linux). A fixed
+# metric font keeps the rendered columns aligned so OCR reads clean tables.
+FONT_CANDIDATES = (
+    "/System/Library/Fonts/Menlo.ttc",                       # macOS
+    "C:\\Windows\\Fonts\\consola.ttf",                       # Windows
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",   # Linux
+)
+
+
+def _font(size: int):
+    for path in FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 PRICE_HISTORY = [
     # sku, description, unit_price, date
@@ -72,8 +88,8 @@ def render(inv: dict) -> None:
     W, H = 1400, 1000
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
-    big = ImageFont.truetype(FONT, 40)
-    med = ImageFont.truetype(FONT, 28)
+    big = _font(40)
+    med = _font(28)
 
     d.text((60, 50), inv["vendor"], fill="black", font=big)
     d.text((60, 120), f"INVOICE {inv['no']}    DATE {inv['date']}",

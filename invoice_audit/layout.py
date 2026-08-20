@@ -36,6 +36,12 @@ class LineItem:
     line_total: float
     min_confidence: float
     row_text: str = ""
+    # Source tokens for the three money numbers — kept so the grounding layer
+    # can trace each emitted number back to a single clean pixel box. Optional
+    # (None) so hand-built LineItems in tests stay valid.
+    qty_tok: "Token | None" = None
+    unit_tok: "Token | None" = None
+    total_tok: "Token | None" = None
 
 
 @dataclass
@@ -135,6 +141,9 @@ def parse_invoice(tokens: list[Token]) -> ParsedInvoice:
                 line_total=_money(total_toks[0].text),
                 min_confidence=min(t.confidence for t in used),
                 row_text=row_text,
+                qty_tok=qty_toks[0],
+                unit_tok=unit_toks[0],
+                total_tok=total_toks[0],
             )
         )
 

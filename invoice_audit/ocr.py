@@ -1,12 +1,22 @@
-"""OCR stage — run the on-device Vision CLI and return positioned tokens.
+"""OCR stage — return positioned tokens from one of two on-device backends.
 
-Fail-closed: a missing binary or an OCR failure raises AuditError with a
-named reason; we never return a fabricated or partial page silently.
+Only OCR is OS-specific; it is the seam the whole pipeline hangs off. macOS
+uses the on-device Apple Vision CLI; Windows 11 uses Tesseract (chosen because
+it emits per-word confidence, which grounding.py requires). Both emit the same
+Token schema, so layout/validate/grounding/floor/receipt are identical.
+
+Backend selection: env `INVOICE_AUDIT_OCR` = vision | tesseract | auto
+(default auto — Windows→tesseract, else Vision binary if present, else
+tesseract). Fail-closed: a missing binary or an OCR failure raises AuditError
+with a named reason; we never return a fabricated or partial page silently.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,7 +54,35 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def ocr_image(path: Path) -> list[Token]:
+def _select_backend() -> str:
+    b = os.environ.get("INVOICE_AUDIT_OCR", "auto").lower()
+    if b in ("vision", "tesseract"):
+        return b
+    if platform.system() == "Windows":
+        return "tesseract"
+    if BIN.exists():
+        return "vision"
+    if shutil.which("tesseract"):
+        return "tesseract"
+    return "vision"  # nothing available → clear ocr-binary-missing below
+
+
+def backend_label(backend: str | None = None) -> str:
+    """Human/receipt label for the OCR backend actually in use — so a receipt
+    never claims Apple Vision when Tesseract (Windows) produced the tokens."""
+    return ("apple-vision/vision-ocr"
+            if (backend or _select_backend()) == "vision"
+            else "tesseract")
+
+
+def ocr_image(path: Path, backend: str | None = None) -> list[Token]:
+    if (backend or _select_backend()) == "tesseract":
+        from .ocr_tesseract import ocr_image_tesseract
+        return ocr_image_tesseract(path)
+    return _ocr_vision(path)
+
+
+def _ocr_vision(path: Path) -> list[Token]:
     if not BIN.exists():
         raise AuditError("ocr-binary-missing:bin/vision-ocr (build with scripts/build.sh)")
     if not path.exists():
