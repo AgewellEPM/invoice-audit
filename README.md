@@ -66,6 +66,30 @@ python3 -m invoice_audit verify <receipt.json>   # re-check signature + input ha
 - **Taught rules (`--floor`):** JSON, schema `invoice-audit.floor.v1`; each rule
   carries `source` + `evidence` and is hashed into the receipt.
 
+## Native Demo Apps
+
+For a non-terminal demo, launch the small native shell:
+
+```bash
+scripts/run_swift_app.sh
+scripts/build_swift_app.sh              # creates dist/Invoice Audit.app
+```
+
+The SwiftUI app opens directly into the audit workspace: run the demo audit,
+inspect invoice images, review flagged findings, verify the receipt, and reveal
+the signed JSON artifact. It is intentionally thin; all results still come from
+the same Python engine and signed receipt path.
+
+On Windows 11, use the native launcher:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_windows_native.ps1 -Setup
+powershell -ExecutionPolicy Bypass -File scripts\run_windows_native.ps1
+```
+
+That shell uses native Windows controls and the same Tesseract-backed OCR path
+as `scripts\run_windows.ps1`.
+
 ## Demo (real OCR, planted cases)
 
 ```bash

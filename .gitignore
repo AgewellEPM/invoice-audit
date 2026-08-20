@@ -4,3 +4,6 @@ __pycache__/
 demo/scans/
 demo/pricebook.csv
 .invoice-audit/
+.invoice-audit-app/
+apps/swift/**/.build/
+dist/
