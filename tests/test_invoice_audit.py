@@ -7,6 +7,8 @@ planted cases (overcharge / arithmetic / no-reference) each flag, by name.
 from __future__ import annotations
 
 import json
+import base64
+import os
 import subprocess
 import sqlite3
 import sys
@@ -25,6 +27,10 @@ from invoice_audit.analytics import (  # noqa: E402
 from invoice_audit.analyst import answer_question  # noqa: E402
 from invoice_audit.audit import audit_folder  # noqa: E402
 from invoice_audit.categories import classify_item  # noqa: E402
+from invoice_audit.connectors import (  # noqa: E402
+    ConnectorConfig, connector_presets, sync_connector, write_connector_config)
+from invoice_audit.data_quality import (  # noqa: E402
+    data_quality_report, normalize_invoice_date)
 from invoice_audit.floor import Floor, Rule  # noqa: E402
 from invoice_audit.grounding import (  # noqa: E402
     GROUND_CONFIDENCE, ground_line, stated_total_reconciles)
@@ -192,6 +198,92 @@ def test_receipt_carries_line_and_invoice_categories():
     assert by_sku["SEN-7781"]["policy_delta_total"] == 168.0
     assert classify_item("SEN-7781", "PROXIMITY SENSOR HD",
                          "YANKEE FORKLIFT PARTS CO")["category"] == "Sensors & Controls"
+
+
+def test_receipt_orders_invoices_chronologically_and_reports_data_rot():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    assert [inv["date"] for inv in receipt["invoices"]] == [
+        "2026-08-12", "2026-08-14", "2026-08-17",
+    ]
+    assert receipt["dataQuality"]["issueCount"] == 0
+    assert receipt["dataQuality"]["timeline"][0]["invoice"] == "invoice-30071.png"
+    assert normalize_invoice_date("08/12/26") == "2026-08-12"
+
+    rot = data_quality_report([
+        {"file": "a.png", "vendor": "V", "invoice_no": "1", "date": "UNKNOWN"},
+        {"file": "b.png", "vendor": "V", "invoice_no": "1", "date": "2099-01-01"},
+    ])
+    kinds = {issue["kind"] for issue in rot["issues"]}
+    assert "missing-or-unreadable-date" in kinds
+    assert "future-dated-invoice" in kinds
+    assert "duplicate-invoice-number" in kinds
+
+
+def test_optional_market_pricing_adds_human_review_flags():
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        market = Path(d) / "market.csv"
+        market.write_text(
+            "sku,description,unit_price,date\n"
+            "HYD-4410,HYDRAULIC PUMP ASSY,3000.00,2026-08-01\n"
+            "FLT-2200,FORKLIFT BRAKE KIT,412.50,2026-08-01\n"
+            "OIL-0055,FORM OIL 55 GAL DRUM,289.00,2026-08-01\n"
+            "RBR-0620,REBAR #6 20FT BUNDLE,184.00,2026-08-01\n"
+            "CEM-0094,PORTLAND CEMENT T-I/II PALLET,612.00,2026-08-01\n"
+            "SEN-7781,PROXIMITY SENSOR HD,60.00,2026-08-01\n"
+        )
+        receipt = audit_folder(
+            DEMO / "scans",
+            DEMO / "pricebook.csv",
+            floor_path=DEMO / "floor-rules.json",
+            market_path=market,
+        )
+        kinds = {(item["invoice"], item["kind"]) for item in receipt["reviewQueue"]}
+        assert ("invoice-30071.png", "market-overcharge-flag") in kinds
+        assert ("invoice-30073.png", "market-overcharge-flag") in kinds
+        assert receipt["totals"]["marketOverchargeUSD"] > 0
+        assert receipt["marketPricebook"]["rows"] == 6
+        assert verify_receipt(receipt, rehash_inputs=True) == []
+        market.write_text(market.read_text() + "NEW-1,NEW,1.00,2026-08-01\n")
+        assert "market-pricebook-hash-changed:market.csv" in verify_receipt(
+            receipt, rehash_inputs=True)
+
+
+def test_llm_extraction_review_flags_disagreement_for_human():
+    _ensure_fixtures()
+    base = audit_folder(DEMO / "scans", DEMO / "pricebook.csv")
+    fixture = {}
+    for inv in base["invoices"]:
+        fixture[inv["file"]] = {
+            "invoice_no": inv["invoice_no"],
+            "lines": [
+                {
+                    "sku": line["sku"],
+                    "description": line["description"],
+                    "qty": line["qty"],
+                    "unit_price": line["unit_price"],
+                    "line_total": line["line_total"],
+                }
+                for line in inv["lines"]
+            ],
+        }
+    fixture["invoice-30072.png"]["lines"] = []
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "llm.json"
+        path.write_text(json.dumps(fixture))
+        prev = os.environ.get("INVOICE_AUDIT_LLM_FIXTURE")
+        os.environ["INVOICE_AUDIT_LLM_FIXTURE"] = str(path)
+        try:
+            receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv")
+        finally:
+            if prev is None:
+                os.environ.pop("INVOICE_AUDIT_LLM_FIXTURE", None)
+            else:
+                os.environ["INVOICE_AUDIT_LLM_FIXTURE"] = prev
+    kinds = {(item["invoice"], item["kind"]) for item in receipt["reviewQueue"]}
+    assert ("invoice-30072.png", "llm-line-count-disagreement") in kinds
 
 
 def test_pdf_input_renders_to_ocr_image_and_keeps_source_trace():
@@ -508,6 +600,61 @@ def test_webhook_sender_posts_business_report_json():
     posted = received["payload"]
     assert posted["event_type"] == "invoice_audit.business_report.v1"
     assert posted["overview"]["findings"] == 6
+
+
+def test_connector_syncs_local_or_network_folder_to_managed_workspace():
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        config = write_connector_config(
+            ConnectorConfig(
+                kind="network-folder",
+                name="Plant AP",
+                invoices=str(DEMO / "scans"),
+                pricebook=str(DEMO / "pricebook.csv"),
+                floor=str(DEMO / "floor-rules.json"),
+            ),
+            root / "source.json",
+        )
+        manifest = sync_connector(config, root / "workspace")
+        assert Path(manifest["scans_dir"]).is_dir()
+        assert Path(manifest["pricebook"]).exists()
+        assert Path(manifest["floor"]).exists()
+        assert sum(1 for f in manifest["files"] if f["role"] == "invoice") == 3
+        assert any(p["kind"] == "quickbooks" for p in connector_presets())
+
+
+def test_connector_syncs_api_json_for_zapier_style_pull():
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        payload = {
+            "files": [
+                {
+                    "role": "invoice",
+                    "name": "invoice-30072.png",
+                    "content_base64": base64.b64encode(
+                        (DEMO / "scans" / "invoice-30072.png").read_bytes()
+                    ).decode("ascii"),
+                }
+            ],
+            "pricebook_csv": (DEMO / "pricebook.csv").read_text(),
+        }
+        api = root / "api.json"
+        api.write_text(json.dumps(payload))
+        config = write_connector_config(
+            ConnectorConfig(
+                kind="api-json",
+                name="Zapier Pull",
+                url=api.as_uri(),
+            ),
+            root / "source.json",
+        )
+        manifest = sync_connector(config, root / "workspace")
+        assert Path(manifest["pricebook"]).exists()
+        invoices = [f for f in manifest["files"] if f["role"] == "invoice"]
+        assert len(invoices) == 1
+        assert invoices[0]["name"] == "invoice-30072.png"
 
 
 def test_watch_once_skips_unchanged_inputs_and_reacts_to_source_change():

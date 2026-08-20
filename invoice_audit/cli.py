@@ -1,7 +1,11 @@
 """CLI — audit scans, persist findings, verify receipts.
 
-  python3 -m invoice_audit audit <scans-dir> --pricebook <csv|sqlite> [--out receipt.json]
+  python3 -m invoice_audit audit <scans-dir> --pricebook <csv|sqlite> [--market <csv|sqlite>]
   python3 -m invoice_audit audit-db <scans-dir> --pricebook <csv|sqlite> --db business.sqlite
+  python3 -m invoice_audit connector-presets
+  python3 -m invoice_audit connector-init --kind local-folder --out source.json ...
+  python3 -m invoice_audit connector-sync --config source.json --workspace .sources
+  python3 -m invoice_audit audit-connector --config source.json --workspace .sources --db business.sqlite
   python3 -m invoice_audit findings --db business.sqlite
   python3 -m invoice_audit ask --db business.sqlite "show overcharges"
   python3 -m invoice_audit analytics --db business.sqlite
@@ -26,6 +30,8 @@ from .analytics import (
     write_html_report, write_integration_payload, write_slack_payload)
 from .analyst import answer_question
 from .audit import audit_folder
+from .connectors import (
+    ConnectorConfig, connector_presets, sync_connector, write_connector_config)
 from .ocr import AuditError
 from .receipt import verify_receipt
 from .store import connect, list_findings, store_receipt
@@ -39,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("audit", help="audit a folder of invoice scans")
     a.add_argument("scans_dir", type=Path)
     a.add_argument("--pricebook", type=Path, required=True)
+    a.add_argument("--market", type=Path, default=None,
+                   help="optional market benchmark CSV/SQLite")
     a.add_argument("--floor", type=Path, default=None,
                    help="taught vendor/domain rules (JSON) — symbolic veto layer")
     a.add_argument("--tolerance", type=float, default=0.15)
@@ -47,12 +55,40 @@ def main(argv: list[str] | None = None) -> int:
     adb = sub.add_parser("audit-db", help="audit scans and persist into SQLite")
     adb.add_argument("scans_dir", type=Path)
     adb.add_argument("--pricebook", type=Path, required=True)
+    adb.add_argument("--market", type=Path, default=None,
+                     help="optional market benchmark CSV/SQLite")
     adb.add_argument("--floor", type=Path, default=None,
                      help="taught vendor/domain rules (JSON)")
     adb.add_argument("--tolerance", type=float, default=0.15)
     adb.add_argument("--db", type=Path, required=True)
     adb.add_argument("--out", type=Path, default=None,
                      help="optional signed receipt JSON path")
+
+    cp = sub.add_parser("connector-presets", help="list point-click inbound source options")
+    cp.add_argument("--json", action="store_true")
+
+    ci = sub.add_parser("connector-init", help="write an inbound connector config")
+    ci.add_argument("--kind", required=True)
+    ci.add_argument("--name", default="")
+    ci.add_argument("--invoices", default="")
+    ci.add_argument("--pricebook", default="")
+    ci.add_argument("--floor", default="")
+    ci.add_argument("--url", default="")
+    ci.add_argument("--token-env", default="")
+    ci.add_argument("--mbox", default="")
+    ci.add_argument("--out", type=Path, required=True)
+
+    cs = sub.add_parser("connector-sync", help="pull connector data into a managed workspace")
+    cs.add_argument("--config", type=Path, required=True)
+    cs.add_argument("--workspace", type=Path, required=True)
+
+    ac = sub.add_parser("audit-connector", help="sync a connector, then audit it")
+    ac.add_argument("--config", type=Path, required=True)
+    ac.add_argument("--workspace", type=Path, required=True)
+    ac.add_argument("--db", type=Path, required=True)
+    ac.add_argument("--out", type=Path, default=None)
+    ac.add_argument("--market", type=Path, default=None)
+    ac.add_argument("--tolerance", type=float, default=0.15)
 
     f = sub.add_parser("findings", help="list findings from SQLite")
     f.add_argument("--db", type=Path, required=True)
@@ -117,7 +153,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "audit":
             receipt = audit_folder(args.scans_dir, args.pricebook,
                                    tolerance=args.tolerance,
-                                   floor_path=args.floor)
+                                   floor_path=args.floor,
+                                   market_path=args.market)
             out = args.out or (args.scans_dir / "audit-receipt.json")
             out.write_text(json.dumps(receipt, indent=2, sort_keys=True))
             t = receipt["totals"]
@@ -133,7 +170,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "audit-db":
             receipt = audit_folder(args.scans_dir, args.pricebook,
                                    tolerance=args.tolerance,
-                                   floor_path=args.floor)
+                                   floor_path=args.floor,
+                                   market_path=args.market)
             if args.out:
                 args.out.write_text(json.dumps(receipt, indent=2, sort_keys=True))
             with connect(args.db) as con:
@@ -143,7 +181,57 @@ def main(argv: list[str] | None = None) -> int:
             print(f"invoices={t['invoices']} lines={t['linesChecked']} "
                   f"flagged={t['flagged']} "
                   f"potentialOverchargeUSD={t['potentialOverchargeUSD']:.2f} "
+                  f"marketOverchargeUSD={t.get('marketOverchargeUSD', 0):.2f} "
                   f"policyOverageUSD={t['policyOverageUSD']:.2f}")
+            return 0
+        if args.cmd == "connector-presets":
+            presets = connector_presets()
+            if args.json:
+                print(json.dumps(presets, indent=2, sort_keys=True))
+            else:
+                for preset in presets:
+                    print(f"{preset['kind']}: {preset['label']} [{preset['status']}]")
+                    print(f"  {preset['description']}")
+            return 0
+        if args.cmd == "connector-init":
+            path = write_connector_config(
+                ConnectorConfig(
+                    kind=args.kind,
+                    name=args.name or args.kind,
+                    invoices=args.invoices,
+                    pricebook=args.pricebook,
+                    floor=args.floor,
+                    url=args.url,
+                    token_env=args.token_env,
+                    mbox=args.mbox,
+                ),
+                args.out,
+            )
+            print(path)
+            return 0
+        if args.cmd == "connector-sync":
+            manifest = sync_connector(args.config, args.workspace)
+            print(json.dumps(manifest, indent=2, sort_keys=True))
+            return 0
+        if args.cmd == "audit-connector":
+            manifest = sync_connector(args.config, args.workspace)
+            floor = Path(manifest["floor"]) if manifest.get("floor") else None
+            receipt = audit_folder(
+                Path(manifest["scans_dir"]),
+                Path(manifest["pricebook"]),
+                tolerance=args.tolerance,
+                floor_path=floor,
+                market_path=args.market,
+            )
+            if args.out:
+                args.out.write_text(json.dumps(receipt, indent=2, sort_keys=True))
+            with connect(args.db) as con:
+                receipt_id = store_receipt(con, receipt)
+            t = receipt["totals"]
+            print(f"stored receipt_id={receipt_id} db={args.db}")
+            print(f"connector={manifest['connector']['name']} "
+                  f"invoices={t['invoices']} flagged={t['flagged']} "
+                  f"dataQualityIssues={t.get('dataQualityIssues', 0)}")
             return 0
         if args.cmd == "findings":
             with connect(args.db) as con:

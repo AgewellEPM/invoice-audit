@@ -269,7 +269,7 @@ def store_receipt(con: sqlite3.Connection, receipt: dict) -> int:
                 invoice_id,
                 line_id,
                 item.get("kind", ""),
-                severity_for(item.get("kind", "")),
+                item.get("severity") or severity_for(item.get("kind", "")),
                 item.get("detail", ""),
                 json.dumps(item, sort_keys=True),
             ),
@@ -501,11 +501,15 @@ def _jeeves_verdict_for(line: dict, relation: str) -> str:
 
 
 def severity_for(kind: str) -> str:
-    if kind == "overcharge-flag":
+    if kind in {"overcharge-flag", "market-overcharge-flag"}:
         return "money"
     if kind == "floor-veto":
         return "policy"
     if kind in {"arithmetic-mismatch", "weak-grounding", "ungrounded", "low-confidence"}:
+        return "evidence"
+    if kind.startswith("llm-") or kind in {
+        "missing-or-unreadable-date", "future-dated-invoice", "duplicate-invoice-number",
+    }:
         return "evidence"
     return "reference"
 

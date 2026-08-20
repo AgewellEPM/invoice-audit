@@ -49,7 +49,10 @@ final class AuditModel: ObservableObject {
     @Published var transcript = ""
     @Published var invoiceFolderURL: URL?
     @Published var pricebookURL: URL?
+    @Published var marketURL: URL?
     @Published var rulesURL: URL?
+    @Published var sourceAPIURL = ""
+    @Published var connectorStatus = "Local folder, network folder, email export, and API/Zapier sources are supported."
     @Published var analystQuestion = "show overcharges"
     @Published var analystAnswer = "Run an audit, then ask about overcharges, policy exceptions, OCR evidence, missing history, or a specific invoice."
     @Published var analystIsRunning = false
@@ -63,6 +66,8 @@ final class AuditModel: ObservableObject {
     private let reportURL: URL
     private let emailDraftURL: URL
     private let integrationPayloadURL: URL
+    private let connectorConfigURL: URL
+    private let connectorWorkspaceURL: URL
 
     init() {
         let envRoot = ProcessInfo.processInfo.environment["INVOICE_AUDIT_ROOT"]
@@ -90,6 +95,12 @@ final class AuditModel: ObservableObject {
         integrationPayloadURL = repoRoot
             .appendingPathComponent(".invoice-audit-app", isDirectory: true)
             .appendingPathComponent("integration-payload.json")
+        connectorConfigURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("source-connector.json")
+        connectorWorkspaceURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("connector-workspace", isDirectory: true)
     }
 
     var selectedInvoice: InvoiceView? {
@@ -162,6 +173,11 @@ final class AuditModel: ObservableObject {
         }
     }
 
+    func chooseNetworkFolder() {
+        chooseInvoiceFolder()
+        connectorStatus = "Network/mounted folder selected. Choose price history, then run audit."
+    }
+
     func choosePricebook() {
         let panel = NSOpenPanel()
         panel.title = "Choose Price History"
@@ -178,6 +194,29 @@ final class AuditModel: ObservableObject {
             pricebookURL = panel.url
             status = "Price history selected"
         }
+    }
+
+    func chooseMarket() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Optional Market Benchmark"
+        panel.allowedContentTypes = [
+            UTType.commaSeparatedText,
+            UTType(filenameExtension: "sqlite"),
+            UTType(filenameExtension: "sqlite3"),
+            UTType(filenameExtension: "db")
+        ].compactMap { $0 }
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK {
+            marketURL = panel.url
+            status = "Market benchmark selected"
+        }
+    }
+
+    func clearMarket() {
+        marketURL = nil
+        status = "Market benchmark cleared"
     }
 
     func chooseRules() {
@@ -201,8 +240,61 @@ final class AuditModel: ObservableObject {
     func useSampleData() {
         invoiceFolderURL = repoRoot.appendingPathComponent("demo/scans", isDirectory: true)
         pricebookURL = repoRoot.appendingPathComponent("demo/pricebook.csv")
+        marketURL = nil
         rulesURL = repoRoot.appendingPathComponent("demo/floor-rules.json")
         status = "Sample data selected"
+    }
+
+    func pullAPIConnector() async {
+        let url = sourceAPIURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else {
+            connectorStatus = "Paste an API/Zapier URL first."
+            return
+        }
+        isRunning = true
+        connectorStatus = "Pulling source data..."
+        do {
+            try FileManager.default.createDirectory(
+                at: connectorConfigURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            _ = try await runPython([
+                "-m", "invoice_audit", "connector-init",
+                "--kind", "api-json",
+                "--name", "API Source",
+                "--url", url,
+                "--out", connectorConfigURL.path
+            ])
+            let output = try await runPython([
+                "-m", "invoice_audit", "connector-sync",
+                "--config", connectorConfigURL.path,
+                "--workspace", connectorWorkspaceURL.path
+            ])
+            transcript += output
+            try loadConnectorManifest(from: output)
+            connectorStatus = "Source data pulled. Run audit when ready."
+            status = "Connector data ready"
+        } catch {
+            connectorStatus = "Connector pull failed"
+            transcript += "\nConnector pull failed: \(error.localizedDescription)"
+        }
+        isRunning = false
+    }
+
+    private func loadConnectorManifest(from text: String) throws {
+        guard let data = text.data(using: .utf8),
+              let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw AppError("Connector sync did not return JSON")
+        }
+        if let scans = json["scans_dir"] as? String {
+            invoiceFolderURL = URL(fileURLWithPath: scans)
+        }
+        if let pricebook = json["pricebook"] as? String {
+            pricebookURL = URL(fileURLWithPath: pricebook)
+        }
+        if let floor = json["floor"] as? String, !floor.isEmpty {
+            rulesURL = URL(fileURLWithPath: floor)
+        }
     }
 
     func runDemoAudit() async {
@@ -232,6 +324,9 @@ final class AuditModel: ObservableObject {
                 "--db", dbURL.path,
                 "--out", receiptURL.path
             ]
+            if let marketURL {
+                args.append(contentsOf: ["--market", marketURL.path])
+            }
             if let rulesURL {
                 args.append(contentsOf: ["--floor", rulesURL.path])
             }
@@ -408,6 +503,7 @@ final class AuditModel: ObservableObject {
             if let receipt {
                 invoiceFolderURL = receipt.invoiceFolderURL
                 pricebookURL = receipt.pricebookURL
+                marketURL = receipt.marketURL
                 rulesURL = receipt.rulesURL
             }
             selectedInvoiceID = receipt?.invoices.first?.id
@@ -452,8 +548,10 @@ struct ReceiptSummary {
     let signature: String
     let invoiceFolderURL: URL?
     let pricebookURL: URL?
+    let marketURL: URL?
     let rulesURL: URL?
     let pricebookRows: Int
+    let marketRows: Int?
     let ruleCount: Int?
     let totals: Totals
     let invoices: [InvoiceView]
@@ -462,6 +560,7 @@ struct ReceiptSummary {
     init(json: [String: Any], repoRoot: URL) {
         let engine = json["engine"] as? [String: Any] ?? [:]
         let pricebook = json["pricebook"] as? [String: Any] ?? [:]
+        let market = json["marketPricebook"] as? [String: Any]
         let floorRules = json["floorRules"] as? [String: Any]
         let scans = json["scans"] as? [[String: Any]] ?? []
         generatedAt = json["generatedAt"] as? String ?? "Unknown"
@@ -470,6 +569,8 @@ struct ReceiptSummary {
         signature = String((json["signature"] as? String ?? "").prefix(16))
         pricebookURL = Self.url(from: pricebook["path"] as? String, repoRoot: repoRoot)
         pricebookRows = pricebook["rows"] as? Int ?? 0
+        marketURL = Self.url(from: market?["path"] as? String, repoRoot: repoRoot)
+        marketRows = market?["rows"] as? Int
         rulesURL = Self.url(from: floorRules?["path"] as? String, repoRoot: repoRoot)
         ruleCount = floorRules?["rules"] as? Int
         invoiceFolderURL = Self.invoiceFolder(from: scans, repoRoot: repoRoot)
@@ -768,6 +869,17 @@ struct SourceSetupView: View {
                     action: model.choosePricebook
                 )
                 SourceCard(
+                    title: "Market",
+                    detail: model.marketURL?.lastPathComponent
+                        ?? "Optional market benchmark",
+                    systemImage: "chart.line.uptrend.xyaxis",
+                    isReady: model.marketURL != nil,
+                    actionTitle: model.marketURL == nil ? "Choose File" : "Change",
+                    action: model.chooseMarket,
+                    secondaryTitle: model.marketURL == nil ? nil : "Clear",
+                    secondaryAction: model.clearMarket
+                )
+                SourceCard(
                     title: "Rules",
                     detail: model.rulesURL?.lastPathComponent
                         ?? "Optional policy/rule file",
@@ -779,6 +891,39 @@ struct SourceSetupView: View {
                     secondaryAction: model.clearRules
                 )
             }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label("Source Connectors", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Button {
+                        model.chooseNetworkFolder()
+                    } label: {
+                        Label("Network Folder", systemImage: "externaldrive.connected.to.line.below")
+                    }
+                    .disabled(model.isRunning)
+                }
+
+                HStack(spacing: 8) {
+                    TextField("Paste API/Zapier source URL", text: $model.sourceAPIURL)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(model.isRunning)
+                    Button {
+                        Task { await model.pullAPIConnector() }
+                    } label: {
+                        Label("Pull Data", systemImage: "arrow.down.doc")
+                    }
+                    .disabled(model.isRunning || model.sourceAPIURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                Text(model.connectorStatus)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .padding(12)
+            .background(.white.opacity(0.66), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(14)
         .background(.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 8))
@@ -1350,6 +1495,7 @@ struct ReceiptFacts: View {
         VStack(alignment: .leading, spacing: 7) {
             FactRow("Source", receipt.invoiceFolderURL?.lastPathComponent ?? "Unknown")
             FactRow("Prices", "\(receipt.pricebookRows) rows")
+            FactRow("Market", receipt.marketRows.map { "\($0) rows" } ?? "None")
             FactRow("Rules", receipt.ruleCount.map { "\($0) rules" } ?? "None")
             FactRow("OCR", receipt.ocrEngine)
             FactRow("Engine", receipt.extractionEngine)

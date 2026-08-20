@@ -13,25 +13,28 @@ that always goes to a person. Proof is the product.
 ## The pipeline (one responsibility per module)
 
 ```
-scan ─▶ ocr.py ─▶ layout.py ─▶ validate.py ─▶ grounding.py ─▶ floor.py ─┐
-(PNG)   (Apple    (determin-   (qty×unit==    (trace every    (human-    │
-        Vision,    istic table  total, sum     number to      taught      ├▶ audit.py
-        on-device  reconstruct) == stated)     clean pixels   rules       │  (human
-        / Tessd)                               + witness or    VETO)       │   gate)
-                                               FAIL CLOSED)                │
-                                                                          ▼
-                                                        signed receipt .json (receipt.py, Ed25519)
-                                                                          │
-                                                                          ▼
-category map ─▶ SQLite store ─▶ analyst / CSV export / HTML report / Slack payload
-               (Jeeves/PREL-
-                style claims)
+source connectors ─▶ scans/PDFs + price/market data
+        │
+        ▼
+ocr.py ─▶ layout.py ─▶ llm_extract.py ─▶ validate.py ─▶ grounding.py ─▶ floor.py
+Apple/     deterministic   optional       qty×unit      trace every      taught
+Tesseract  table rebuild   review seam    checks        money number    rules
+        │
+        ▼
+audit.py ─▶ signed receipt JSON ─▶ category map ─▶ SQLite/Jeeves-PREL claims
+        │                                      │
+        ▼                                      ▼
+human review queue                 analyst / CSV / HTML / email / API/webhook
 ```
 
 - **Deterministic where it matters.** OCR is probabilistic; *everything after
   is not*. Column layout is anchored to the invoice's own headers; the
   arithmetic gate re-derives every total; the price check is the customer's
   median historical price. A model never decides whether you were overcharged.
+- **Optional OCR + LLM extraction review.** `llm_extract.py` defines the line-item
+  schema and comparison seam for an LLM extraction/review pass. When configured,
+  LLM disagreements become human-review findings; they never overwrite money
+  fields silently.
 - **The number pipeline never emits a hallucinated number** (`grounding.py`).
   The arithmetic gate catches an *inconsistent* line; grounding catches the
   harder case — a line OCR misread into a *self-consistent wrong* triple. Every
@@ -55,6 +58,9 @@ category map ─▶ SQLite store ─▶ analyst / CSV export / HTML report / Sla
   Nothing degrades quietly.
 - **Human gate is structural.** `audit.py` puts every flag in a review queue;
   it approves and rejects nothing.
+- **Chronology and data rot:** `data_quality.py` normalizes invoice dates,
+  orders invoices chronologically, and flags missing/unreadable dates, future
+  dates, and duplicate invoice numbers.
 - **What happens after extraction:** `categories.py` maps every invoice and
   every line item into an auditable category claim; `store.py` persists the
   signed receipt into SQL; `analytics.py` turns that into category/vendor spend,
@@ -66,10 +72,18 @@ category map ─▶ SQLite store ─▶ analyst / CSV export / HTML report / Sla
 ```bash
 scripts/build.sh                       # compile the on-device OCR binary (macOS)
 python3 -m invoice_audit audit <scans-dir> --pricebook <history.csv|.sqlite> \
-                                          [--floor <rules.json>]
+                                          [--floor <rules.json>] \
+                                          [--market <market.csv|.sqlite>]
 python3 -m invoice_audit audit-db <scans-dir> --pricebook <history.csv|.sqlite> \
                                              --db business.sqlite \
-                                             [--floor <rules.json>]
+                                             [--floor <rules.json>] \
+                                             [--market <market.csv|.sqlite>]
+python3 -m invoice_audit connector-presets
+python3 -m invoice_audit connector-init --kind local-folder --invoices <folder> \
+                                        --pricebook <history.csv> --out source.json
+python3 -m invoice_audit connector-sync --config source.json --workspace .sources
+python3 -m invoice_audit audit-connector --config source.json --workspace .sources \
+                                         --db business.sqlite
 python3 -m invoice_audit findings --db business.sqlite
 python3 -m invoice_audit ask --db business.sqlite "show overcharges"
 python3 -m invoice_audit analytics --db business.sqlite
@@ -88,6 +102,14 @@ python3 -m invoice_audit verify <receipt.json>   # re-check signature + input ha
 - **Price history:** CSV (`sku,description,unit_price,date`) or SQLite (a
   `price_history(sku,description,unit_price)` table) — the shapes the kist
   Data-Exchange engine already exports.
+- **Market pricing:** optional `--market` CSV/SQLite uses the same schema as a
+  benchmark source. Market overages are separate human-review findings and the
+  market file hash is verified in the receipt.
+- **Inbound connectors:** `connector-presets`, `connector-init`, and
+  `connector-sync` create point-click-friendly source configs for local folders,
+  mounted network folders, email `.mbox` exports, and generic API/Zapier JSON.
+  QuickBooks/NetSuite are exposed as presets via API/Zapier until native OAuth
+  is added.
 - **Taught rules (`--floor`):** JSON, schema `invoice-audit.floor.v1`; each rule
   carries `source` + `evidence` and is hashed into the receipt.
 - **PDFs:** accepted directly. Each page is rendered to a cached OCR image under
@@ -123,11 +145,12 @@ scripts/build_swift_app.sh              # creates dist/Invoice Audit.app
 ```
 
 The SwiftUI app opens directly into the audit workspace: choose invoice/PDF
-sources, choose a price-history CSV/SQLite file, run the audit, inspect the
-scan plus OCR-to-digital conversion, review flagged findings, verify the
-receipt, ask the SQL-backed business analyst follow-up questions, open the
-visual business report, generate a boss-ready email draft, export an API file,
-or paste a Zapier/webhook URL and send the business report JSON.
+sources, choose price-history and optional market-benchmark CSV/SQLite files,
+pull source data from a mounted network folder or API/Zapier URL, run the
+audit, inspect the scan plus OCR-to-digital conversion, review flagged findings,
+verify the receipt, ask the SQL-backed business analyst follow-up questions,
+open the visual business report, generate a boss-ready email draft, export an
+API file, or paste a Zapier/webhook URL and send the business report JSON.
 
 On Windows 11, use the native launcher:
 
@@ -162,10 +185,10 @@ survives `verify` and fails the instant a scan / pricebook / rules byte changes.
 ## Status — PILOT-READY
 
 Happy path proven end-to-end on real (rendered) scans and PDF-rendered pages;
-fail-closed on the error paths; **43/43 tests green** (each stage + the
+fail-closed on the error paths; **48/48 tests green** (each stage + the
 grounding ladder + every floor outcome pinned per-site); receipts sign / verify
-/ tamper-detect over scans, original PDFs, pricebook, **and** the taught-rules
-file.
+/ tamper-detect over scans, original PDFs, pricebook, market benchmark, **and**
+the taught-rules file.
 
 **Enterprise-blocked — named gaps (do not claim these work):**
 - **Residual hallucination:** a *high-confidence, self-consistent* OCR misread
@@ -175,10 +198,10 @@ file.
   the natural place to add it (two engines = the second read).
 - **Deep-legacy price history** (trapped in an app with no export) uses the
   Perslis VM+OCR screen-read path — real but not wired into this engine yet.
-- **Inbound connectors beyond local files** (ERP APIs, email inboxes, network
-  shares, app databases) are not wired yet. Current sources are local PDFs/images
-  plus CSV/SQLite price history. Outbound sharing is available through email
-  draft, CSV/report export, and generic webhook JSON.
+- **Native OAuth connectors** for QuickBooks/NetSuite are not implemented yet.
+  Current inbound sources are local/mounted folders, email `.mbox` exports, and
+  generic API/Zapier JSON. Outbound sharing is available through email draft,
+  CSV/report export, and generic webhook JSON.
 - **Layout coverage:** tuned for standard QTY/DESC/UNIT/TOTAL tables; odd vendor
   layouts and OCR-garbled headers/totals fail closed, they don't guess.
 - Not integrated with the kist approval loop / remote-session model yet.

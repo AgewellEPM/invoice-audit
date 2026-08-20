@@ -117,6 +117,13 @@ def verify_receipt(receipt: dict, rehash_inputs: bool = True) -> list[str]:
                 problems.append(f"pricebook-absent:{p.name}")
             elif sha256_file(p) != pb["sha256"]:
                 problems.append(f"pricebook-hash-changed:{p.name}")
+        mp = receipt.get("marketPricebook", {})
+        if mp:
+            p = Path(mp["path"])
+            if not p.exists():
+                problems.append(f"market-pricebook-absent:{p.name}")
+            elif sha256_file(p) != mp["sha256"]:
+                problems.append(f"market-pricebook-hash-changed:{p.name}")
         fr = receipt.get("floorRules")
         if fr:
             p = Path(fr["path"])

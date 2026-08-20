@@ -12,9 +12,12 @@ import datetime
 from pathlib import Path
 
 from .floor import Floor
+from .data_quality import (
+    data_quality_report, normalize_invoice_date, sort_invoices_chronologically)
 from .grounding import ground_line, stated_total_reconciles
 from .ingest import collect_scan_inputs
 from .layout import parse_invoice
+from .llm_extract import review_if_configured
 from .ocr import AuditError, backend_label, ocr_image, sha256_file
 from .pricebook import PriceBook
 from .receipt import SCHEMA, sign_receipt
@@ -23,24 +26,33 @@ from .categories import classify_invoice, classify_item
 
 def audit_folder(scans_dir: Path, pricebook_path: Path,
                  tolerance: float = 0.15,
-                 floor_path: Path | None = None) -> dict:
+                 floor_path: Path | None = None,
+                 market_path: Path | None = None) -> dict:
     scans = collect_scan_inputs(scans_dir)
 
     book = PriceBook.load(pricebook_path)
+    market_book = PriceBook.load(market_path) if market_path is not None else None
     floor = Floor.load(floor_path) if floor_path is not None else None
 
     invoices = []
-    review_queue = []
     potential_overcharge = 0.0
+    market_overcharge = 0.0
     policy_overage = 0.0
     for scan in scans:
         tokens = ocr_image(scan.image_path)
         parsed = parse_invoice(tokens)
+        llm_review = review_if_configured(parsed, scan.file_name)
         flags = arithmetic_flags(parsed)
         reconciles = stated_total_reconciles(parsed)
         lines = []
         for i, line in enumerate(parsed.lines):
             check = book.check(line, tolerance=tolerance)
+            market_check = (
+                market_book.check(line, tolerance=tolerance)
+                if market_book is not None else
+                {"verdict": "not-configured", "matched_on": None,
+                 "detail": "no market benchmark configured"}
+            )
             price_matched = check.get("matched_on") is not None
 
             # Grounding: never emit a number we can't trace + corroborate.
@@ -62,6 +74,7 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
                 "category": category["category"],
                 "categoryEvidence": category,
                 "policy_delta_total": policy_delta_total,
+                "market": market_check,
                 "grounding": grounding,
                 "floor": floor_check,
                 **check,
@@ -71,6 +84,16 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
                 flags.append({"kind": check["verdict"], "line": i,
                               "detail": check["detail"]})
             potential_overcharge += check.get("delta_total", 0.0)
+
+            if market_book is not None:
+                if market_check["verdict"] == "overcharge-flag":
+                    flags.append({"kind": "market-overcharge-flag", "line": i,
+                                  "detail": "market benchmark: "
+                                            + market_check["detail"]})
+                    market_overcharge += market_check.get("delta_total", 0.0)
+                elif market_check["verdict"] == "no-reference":
+                    flags.append({"kind": "market-no-reference", "line": i,
+                                  "detail": market_check["detail"]})
 
             # Grounding is fail-closed: anything not `grounded` is a human flag.
             if grounding["verdict"] == "ungrounded":
@@ -91,6 +114,12 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
                         policy_overage += policy_delta_total
 
         invoice_category = classify_invoice(parsed.vendor, lines)
+        for disagreement in llm_review.get("disagreements", []):
+            flags.append({
+                "kind": disagreement["kind"],
+                "line": disagreement.get("line"),
+                "detail": disagreement["detail"],
+            })
         invoice = {
             "file": scan.file_name,
             "path": str(scan.image_path),
@@ -100,16 +129,26 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
             "source_kind": scan.source_kind,
             "source_page": scan.source_page,
             "vendor": parsed.vendor, "invoice_no": parsed.invoice_no,
-            "date": parsed.date, "stated_total": parsed.stated_total,
+            "raw_date": parsed.date,
+            "date": normalize_invoice_date(parsed.date) or parsed.date,
+            "stated_total": parsed.stated_total,
             "category": invoice_category["category"],
             "categoryEvidence": invoice_category,
+            "llmExtraction": llm_review,
             "statedTotalReconciles": reconciles,
             "lines": lines, "flags": flags,
             "disposition": "flagged" if flags else "clean",
         }
         invoices.append(invoice)
-        for f in flags:
-            review_queue.append({"invoice": scan.file_name, **f})
+
+    invoices = sort_invoices_chronologically(invoices)
+    data_quality = data_quality_report(invoices)
+    review_queue = []
+    for inv in invoices:
+        for f in inv.get("flags", []):
+            review_queue.append({"invoice": inv["file"], **f})
+    for issue in data_quality["issues"]:
+        review_queue.append(issue)
 
     body = {
         "schema": SCHEMA,
@@ -117,6 +156,7 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
             .strftime("%Y-%m-%dT%H:%M:%SZ"),
         "engine": {"ocr": backend_label(),
                    "extraction": "deterministic-layout-v1",
+                   "llm": "optional-extraction-review-v1",
                    "grounding": "trace+over-determination-v1",
                    "floor": "invoice-audit.floor.v1"},
         "scans": [
@@ -142,14 +182,21 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
             "linesChecked": sum(len(i["lines"]) for i in invoices),
             "flagged": len(review_queue),
             "potentialOverchargeUSD": round(potential_overcharge, 2),
+            "marketOverchargeUSD": round(market_overcharge, 2),
             "policyOverageUSD": round(policy_overage, 2),
+            "dataQualityIssues": data_quality["issueCount"],
         },
+        "dataQuality": data_quality,
         "humanGate": "nothing auto-approved; every flag requires a person",
     }
     if floor is not None:
         body["floorRules"] = {"path": str(floor_path),
                               "sha256": sha256_file(floor_path),
                               "rules": len(floor.rules)}
+    if market_book is not None:
+        body["marketPricebook"] = {"path": str(market_path),
+                                   "sha256": market_book.source_sha256,
+                                   "rows": len(market_book.rows)}
     return sign_receipt(body)
 
 
