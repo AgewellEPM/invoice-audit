@@ -53,11 +53,16 @@ final class AuditModel: ObservableObject {
     @Published var analystQuestion = "show overcharges"
     @Published var analystAnswer = "Run an audit, then ask about overcharges, policy exceptions, OCR evidence, missing history, or a specific invoice."
     @Published var analystIsRunning = false
+    @Published var webhookURL = ""
+    @Published var shareStatus = "Generate an email draft or paste a Zapier webhook URL."
+    @Published var shareIsRunning = false
 
     private let repoRoot: URL
     private let receiptURL: URL
     private let dbURL: URL
     private let reportURL: URL
+    private let emailDraftURL: URL
+    private let integrationPayloadURL: URL
 
     init() {
         let envRoot = ProcessInfo.processInfo.environment["INVOICE_AUDIT_ROOT"]
@@ -79,6 +84,12 @@ final class AuditModel: ObservableObject {
         reportURL = repoRoot
             .appendingPathComponent(".invoice-audit-app", isDirectory: true)
             .appendingPathComponent("business-report.html")
+        emailDraftURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("boss-summary.eml")
+        integrationPayloadURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("integration-payload.json")
     }
 
     var selectedInvoice: InvoiceView? {
@@ -117,6 +128,14 @@ final class AuditModel: ObservableObject {
         hasBusinessDatabase
             && !analystIsRunning
             && !analystQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var canShare: Bool {
+        hasBusinessDatabase && !shareIsRunning
+    }
+
+    var canSendWebhook: Bool {
+        canShare && !webhookURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var hasBusinessDatabase: Bool {
@@ -279,6 +298,83 @@ final class AuditModel: ObservableObject {
         } catch {
             transcript += "\nReport generation failed: \(error.localizedDescription)"
         }
+    }
+
+    func generateEmailDraft() async {
+        guard hasBusinessDatabase else {
+            shareStatus = "Run an audit first."
+            return
+        }
+        shareIsRunning = true
+        shareStatus = "Preparing email draft..."
+        await generateReport()
+        do {
+            let output = try await runPython([
+                "-m", "invoice_audit", "email-draft",
+                "--db", dbURL.path,
+                "--out", emailDraftURL.path,
+                "--attach-report", reportURL.path
+            ])
+            transcript += output
+            shareStatus = "Email draft ready"
+            NSWorkspace.shared.open(emailDraftURL)
+        } catch {
+            shareStatus = "Email draft failed"
+            transcript += "\nEmail draft failed: \(error.localizedDescription)"
+        }
+        shareIsRunning = false
+    }
+
+    func exportIntegrationPayload() async {
+        guard hasBusinessDatabase else {
+            shareStatus = "Run an audit first."
+            return
+        }
+        shareIsRunning = true
+        shareStatus = "Preparing API payload..."
+        do {
+            let output = try await runPython([
+                "-m", "invoice_audit", "integration-payload",
+                "--db", dbURL.path,
+                "--out", integrationPayloadURL.path
+            ])
+            transcript += output
+            shareStatus = "API payload ready"
+            NSWorkspace.shared.activateFileViewerSelecting([integrationPayloadURL])
+        } catch {
+            shareStatus = "API payload failed"
+            transcript += "\nAPI payload failed: \(error.localizedDescription)"
+        }
+        shareIsRunning = false
+    }
+
+    func sendWebhook() async {
+        guard hasBusinessDatabase else {
+            shareStatus = "Run an audit first."
+            return
+        }
+        let url = webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else {
+            shareStatus = "Paste a webhook URL first."
+            return
+        }
+        shareIsRunning = true
+        shareStatus = "Sending to webhook..."
+        do {
+            let output = try await runPython([
+                "-m", "invoice_audit", "send-webhook",
+                "--db", dbURL.path,
+                "--url", url
+            ])
+            transcript += output
+            shareStatus = output.localizedCaseInsensitiveContains("\"ok\": true")
+                ? "Webhook sent"
+                : "Webhook returned a non-success response"
+        } catch {
+            shareStatus = "Webhook send failed"
+            transcript += "\nWebhook send failed: \(error.localizedDescription)"
+        }
+        shareIsRunning = false
     }
 
     func askAnalyst() async {
@@ -755,7 +851,9 @@ struct RightRail: View {
             FindingsPanel(receipt: receipt)
                 .frame(maxHeight: .infinity)
             AnalystPanel()
-                .frame(height: 255)
+                .frame(height: 245)
+            SharePanel()
+                .frame(height: 175)
         }
     }
 }
@@ -1154,6 +1252,57 @@ struct AnalystPanel: View {
             }
             .padding(10)
             .background(Color.white.opacity(0.82), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(14)
+        .background(.white.opacity(0.54), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct SharePanel: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Share & Connect", systemImage: "square.and.arrow.up")
+                    .font(.system(size: 16, weight: .semibold))
+                Spacer()
+                if model.shareIsRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await model.generateEmailDraft() }
+                } label: {
+                    Label("Email Draft", systemImage: "envelope")
+                }
+                .disabled(!model.canShare)
+
+                Button {
+                    Task { await model.exportIntegrationPayload() }
+                } label: {
+                    Label("API File", systemImage: "doc.badge.gearshape")
+                }
+                .disabled(!model.canShare)
+            }
+            .buttonStyle(.bordered)
+
+            HStack(spacing: 8) {
+                TextField("Paste Zapier or webhook URL", text: $model.webhookURL)
+                    .textFieldStyle(.roundedBorder)
+                Button("Send") {
+                    Task { await model.sendWebhook() }
+                }
+                .disabled(!model.canSendWebhook)
+            }
+
+            Text(model.shareStatus)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
         }
         .padding(14)
         .background(.white.opacity(0.54), in: RoundedRectangle(cornerRadius: 8))

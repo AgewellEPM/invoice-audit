@@ -80,6 +80,8 @@ New-Item -ItemType Directory -Force -Path $AppState | Out-Null
 $Receipt = Join-Path $AppState "latest-receipt-windows.json"
 $Database = Join-Path $AppState "business-windows.sqlite"
 $Report = Join-Path $AppState "business-report-windows.html"
+$EmailDraft = Join-Path $AppState "boss-summary-windows.eml"
+$IntegrationPayload = Join-Path $AppState "integration-payload-windows.json"
 $InvoiceFolder = $null
 $Pricebook = $null
 $Rules = $null
@@ -134,6 +136,14 @@ $runButton.Anchor = "Top,Right"
 $runButton.Location = New-Object System.Drawing.Point(1008, 24)
 $header.Controls.Add($runButton)
 
+$emailButton = New-Object System.Windows.Forms.Button
+$emailButton.Text = "Email Draft"
+$emailButton.Width = 112
+$emailButton.Height = 36
+$emailButton.Anchor = "Top,Right"
+$emailButton.Location = New-Object System.Drawing.Point(786, 24)
+$header.Controls.Add($emailButton)
+
 $reportButton = New-Object System.Windows.Forms.Button
 $reportButton.Text = "Report"
 $reportButton.Width = 94
@@ -152,7 +162,7 @@ $header.Controls.Add($verifyButton)
 
 $sourcePanel = New-Object System.Windows.Forms.Panel
 $sourcePanel.Dock = "Top"
-$sourcePanel.Height = 108
+$sourcePanel.Height = 148
 $sourcePanel.Padding = New-Object System.Windows.Forms.Padding(22, 4, 22, 12)
 $sourcePanel.BackColor = $paper
 $form.Controls.Add($sourcePanel)
@@ -199,6 +209,36 @@ $sampleButton.Width = 138
 $sampleButton.Height = 32
 $sampleButton.Location = New-Object System.Drawing.Point(476, 60)
 $sourcePanel.Controls.Add($sampleButton)
+
+$webhookLabel = New-Object System.Windows.Forms.Label
+$webhookLabel.Text = "Zapier/API webhook"
+$webhookLabel.ForeColor = $muted
+$webhookLabel.AutoSize = $true
+$webhookLabel.Location = New-Object System.Drawing.Point(22, 105)
+$sourcePanel.Controls.Add($webhookLabel)
+
+$webhookBox = New-Object System.Windows.Forms.TextBox
+$webhookBox.Width = 760
+$webhookBox.Height = 28
+$webhookBox.Location = New-Object System.Drawing.Point(170, 100)
+$webhookBox.Anchor = "Top,Left,Right"
+$sourcePanel.Controls.Add($webhookBox)
+
+$sendApiButton = New-Object System.Windows.Forms.Button
+$sendApiButton.Text = "Send"
+$sendApiButton.Width = 70
+$sendApiButton.Height = 30
+$sendApiButton.Anchor = "Top,Right"
+$sendApiButton.Location = New-Object System.Drawing.Point(948, 99)
+$sourcePanel.Controls.Add($sendApiButton)
+
+$apiFileButton = New-Object System.Windows.Forms.Button
+$apiFileButton.Text = "API File"
+$apiFileButton.Width = 90
+$apiFileButton.Height = 30
+$apiFileButton.Anchor = "Top,Right"
+$apiFileButton.Location = New-Object System.Drawing.Point(1028, 99)
+$sourcePanel.Controls.Add($apiFileButton)
 
 $body = New-Object System.Windows.Forms.TableLayoutPanel
 $body.Dock = "Fill"
@@ -267,6 +307,9 @@ function Update-SourceStatus {
     $sourceStatus.Text = "Invoices: $inv    Price history: $pb    Rules: $rulesText"
     $runButton.Enabled = [bool]($InvoiceFolder -and $Pricebook)
     $reportButton.Enabled = Test-Path $Report
+    $emailButton.Enabled = Test-Path $Database
+    $apiFileButton.Enabled = Test-Path $Database
+    $sendApiButton.Enabled = (Test-Path $Database) -and ($webhookBox.Text.Trim().Length -gt 0)
 }
 
 function Generate-Report {
@@ -277,6 +320,48 @@ function Generate-Report {
         "--out", $Report
     ) | Out-Null
     $reportButton.Enabled = Test-Path $Report
+}
+
+function Generate-EmailDraft {
+    if (-not (Test-Path $Database)) { return }
+    Generate-Report
+    Run-ProcessText $Python @(
+        "-m", "invoice_audit", "email-draft",
+        "--db", $Database,
+        "--out", $EmailDraft,
+        "--attach-report", $Report
+    ) | Out-Null
+    $emailButton.Enabled = Test-Path $EmailDraft
+}
+
+function Export-IntegrationPayload {
+    if (-not (Test-Path $Database)) { return }
+    Run-ProcessText $Python @(
+        "-m", "invoice_audit", "integration-payload",
+        "--db", $Database,
+        "--out", $IntegrationPayload
+    ) | Out-Null
+    $apiFileButton.Enabled = Test-Path $IntegrationPayload
+}
+
+function Send-Webhook {
+    $url = $webhookBox.Text.Trim()
+    if (-not (Test-Path $Database)) {
+        [System.Windows.Forms.MessageBox]::Show("Run an audit first.", "Invoice Audit") | Out-Null
+        return
+    }
+    if ($url.Length -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("Paste a Zapier or webhook URL first.", "Invoice Audit") | Out-Null
+        return
+    }
+    $status.Text = "Sending to webhook..."
+    [System.Windows.Forms.Application]::DoEvents()
+    $out = Run-ProcessText $Python @(
+        "-m", "invoice_audit", "send-webhook",
+        "--db", $Database,
+        "--url", $url
+    )
+    $status.Text = "Webhook sent: " + $out.Trim()
 }
 
 function Load-Receipt {
@@ -416,6 +501,50 @@ $reportButton.Add_Click({
         $status.Text = "Report failed"
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Invoice Audit") | Out-Null
     }
+})
+
+$emailButton.Add_Click({
+    try {
+        Generate-EmailDraft
+        if (Test-Path $EmailDraft) {
+            Start-Process $EmailDraft
+            $status.Text = "Email draft ready"
+        } else {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Run an audit first to prepare an email draft.",
+                "Invoice Audit"
+            ) | Out-Null
+        }
+    } catch {
+        $status.Text = "Email draft failed"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Invoice Audit") | Out-Null
+    }
+})
+
+$apiFileButton.Add_Click({
+    try {
+        Export-IntegrationPayload
+        if (Test-Path $IntegrationPayload) {
+            Start-Process (Split-Path -Parent $IntegrationPayload)
+            $status.Text = "API payload ready"
+        }
+    } catch {
+        $status.Text = "API payload failed"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Invoice Audit") | Out-Null
+    }
+})
+
+$sendApiButton.Add_Click({
+    try {
+        Send-Webhook
+    } catch {
+        $status.Text = "Webhook failed"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Invoice Audit") | Out-Null
+    }
+})
+
+$webhookBox.Add_TextChanged({
+    Update-SourceStatus
 })
 
 $verifyButton.Add_Click({

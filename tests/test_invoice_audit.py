@@ -6,18 +6,22 @@ planted cases (overcharge / arithmetic / no-reference) each flag, by name.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sqlite3
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from invoice_audit.analytics import (  # noqa: E402
-    analytics_text, category_summary, export_csv, slack_payload,
-    vendor_summary, write_html_report)
+    analytics_text, category_summary, export_csv, integration_payload,
+    send_webhook, slack_payload, vendor_summary, write_email_draft,
+    write_html_report, write_integration_payload)
 from invoice_audit.analyst import answer_question  # noqa: E402
 from invoice_audit.audit import audit_folder  # noqa: E402
 from invoice_audit.categories import classify_item  # noqa: E402
@@ -430,6 +434,80 @@ def test_analytics_exports_and_visual_report_map_business_exposure():
             payload = slack_payload(con)
             assert "Invoice Audit: 3 invoices" in payload["text"]
             assert "$6,228.00 potential exposure" in payload["text"]
+
+
+def test_share_outputs_create_boss_email_and_api_payload():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        with connect(root / "business.sqlite") as con:
+            store_receipt(con, receipt)
+            report = write_html_report(con, root / "business-report.html")
+            email = write_email_draft(
+                con,
+                root / "boss-summary.eml",
+                to_addr="boss@example.com",
+                attach_report=report,
+            )
+            payload_path = write_integration_payload(con, root / "api-payload.json")
+
+            email_text = email.read_text()
+            assert "Subject: Invoice Audit Summary" in email_text
+            assert "boss@example.com" in email_text
+            assert "Invoice Audit Executive Summary" in email_text
+            assert "business-report.html" in email_text
+
+            payload = json.loads(payload_path.read_text())
+            assert payload["event_type"] == "invoice_audit.business_report.v1"
+            assert payload["overview"]["total_exposure"] == 6228.0
+            assert payload["categories"][0]["category"] == "Hydraulics"
+            assert "Invoice Audit Executive Summary" in payload["message"]
+
+
+def test_webhook_sender_posts_business_report_json():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    received: dict[str, object] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers["Content-Length"])
+            received["content_type"] = self.headers["Content-Type"]
+            received["payload"] = json.loads(self.rfile.read(length))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            with connect(Path(d) / "business.sqlite") as con:
+                store_receipt(con, receipt)
+                payload = integration_payload(con)
+                assert payload["overview"]["total_exposure"] == 6228.0
+                result = send_webhook(
+                    con,
+                    f"http://127.0.0.1:{server.server_port}/zapier",
+                    timeout=5,
+                )
+                assert result["ok"] is True
+                assert result["status"] == 200
+    finally:
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert received["content_type"] == "application/json"
+    posted = received["payload"]
+    assert posted["event_type"] == "invoice_audit.business_report.v1"
+    assert posted["overview"]["findings"] == 6
 
 
 def test_watch_once_skips_unchanged_inputs_and_reacts_to_source_change():

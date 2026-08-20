@@ -20,7 +20,10 @@ def answer_question(con: sqlite3.Connection, question: str) -> str:
         return _vendor_answer(con)
     if any(term in q for term in ("profit", "revenue", "making the most", "make the most")):
         return _profit_gap_answer()
-    if any(term in q for term in ("export", "csv", "slack", "report", "dashboard")):
+    if any(term in q for term in (
+        "export", "csv", "slack", "report", "dashboard",
+        "email", "boss", "zapier", "webhook", "api",
+    )):
         return _output_answer()
     if any(term in q for term in ("losing", "leak", "leaking", "loss", "costing us")):
         return analytics_text(con)
@@ -176,8 +179,11 @@ def _output_answer() -> str:
         "- CSV export: category_summary, vendor_summary, finding_summary, "
         "invoice_lines, top_findings\n"
         "- HTML report: visual business map with category/vendor exposure bars\n"
-        "- Slack payload: generated JSON summary; actual posting needs an "
-        "explicit webhook configuration"
+        "- Email draft: boss-ready .eml with executive summary and report attachment\n"
+        "- API/Zapier payload: generic JSON for no-code automations\n"
+        "- Webhook send: posts only after a webhook URL is explicitly supplied\n"
+        "- Slack payload: generated JSON summary; Slack posting should use a "
+        "configured webhook/automation"
     )
 
 

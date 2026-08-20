@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import csv
+import datetime
+from email.message import EmailMessage
+from email.utils import formatdate
 import html
 import json
 import sqlite3
 from pathlib import Path
+import urllib.error
+import urllib.request
+from urllib.parse import urlparse
 
 
 def latest_receipt_id(con: sqlite3.Connection) -> int | None:
@@ -277,6 +283,198 @@ def slack_payload(con: sqlite3.Connection) -> dict:
 def write_slack_payload(con: sqlite3.Connection, out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(slack_payload(con), indent=2, sort_keys=True))
+    return out_path
+
+
+def integration_payload(con: sqlite3.Connection) -> dict:
+    """Full Zapier/API-friendly payload.
+
+    This is intentionally generic JSON: tools such as Zapier, Make, Power
+    Automate, Slack webhooks, internal APIs, or simple HTTP receivers can accept
+    it without knowing about the local SQLite schema.
+    """
+    return {
+        "event_type": "invoice_audit.business_report.v1",
+        "generated_at": _utc_now(),
+        "overview": overview(con),
+        "categories": category_summary(con),
+        "vendors": vendor_summary(con),
+        "finding_summary": finding_summary(con),
+        "top_findings": top_findings(con, limit=25),
+        "message": executive_report_text(con),
+    }
+
+
+def write_integration_payload(con: sqlite3.Connection, out_path: Path) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(integration_payload(con), indent=2, sort_keys=True))
+    return out_path
+
+
+def send_webhook(
+    con: sqlite3.Connection,
+    url: str,
+    *,
+    timeout: float = 10.0,
+) -> dict:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("webhook-url-must-be-http-or-https")
+    payload = json.dumps(integration_payload(con), sort_keys=True).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "invoice-audit/1",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(4096).decode("utf-8", errors="replace")
+            return {
+                "ok": 200 <= int(resp.status) < 300,
+                "status": int(resp.status),
+                "body": body,
+            }
+    except urllib.error.HTTPError as e:
+        body = e.read(4096).decode("utf-8", errors="replace")
+        return {"ok": False, "status": int(e.code), "body": body}
+
+
+def executive_report_text(con: sqlite3.Connection) -> str:
+    totals = overview(con)
+    categories = category_summary(con)[:6]
+    vendors = vendor_summary(con)[:6]
+    findings = top_findings(con, limit=8)
+    lines = [
+        "Invoice Audit Executive Summary",
+        "",
+        f"Scanned invoices: {totals['invoices']}",
+        f"Lines checked: {totals['lines']}",
+        f"Scanned spend: {_usd(totals['spend'])}",
+        f"Potential exposure: {_usd(totals['total_exposure'])}",
+        f"  - price exposure: {_usd(totals['price_exposure'])}",
+        f"  - policy exposure: {_usd(totals['policy_exposure'])}",
+        f"Open findings: {totals['findings']}",
+        "",
+        "Where money needs attention",
+    ]
+    for row in categories:
+        lines.append(
+            f"- {row['category']}: {_usd(row['total_exposure'])} exposure, "
+            f"{_usd(row['spend'])} spend, {row['findings']} findings"
+        )
+    lines.extend(["", "Vendor focus"])
+    for row in vendors:
+        lines.append(
+            f"- {row['vendor']}: {_usd(row['total_exposure'])} exposure, "
+            f"{_usd(row['spend'])} spend, {row['findings']} findings"
+        )
+    lines.extend(["", "Top review items"])
+    if not findings:
+        lines.append("- No open findings.")
+    for row in findings:
+        line = "invoice" if row["line"] is None else f"line {row['line']}"
+        lines.append(
+            f"- [{row['severity']}] {row['kind']} — {row['invoice']} {line} "
+            f"{row['sku']}: {row['detail']}"
+        )
+    lines.extend([
+        "",
+        "Recommended next action",
+        "- Review the money/policy findings first, starting with the largest exposure.",
+        "- Connect revenue/job-cost/work-order data next if leadership wants margin/profit reporting.",
+        "",
+        "Evidence note",
+        "- This summary is generated from the signed audit receipt and SQLite evidence store.",
+        "- The attached HTML report shows the visual category/vendor breakdown.",
+    ])
+    return "\n".join(lines)
+
+
+def executive_report_html(con: sqlite3.Connection) -> str:
+    totals = overview(con)
+    categories = category_summary(con)[:6]
+    vendors = vendor_summary(con)[:6]
+    findings = top_findings(con, limit=8)
+    category_items = "".join(
+        f"<li><strong>{_h(row['category'])}</strong>: "
+        f"{_h(_usd(row['total_exposure']))} exposure, "
+        f"{_h(_usd(row['spend']))} spend, {row['findings']} findings</li>"
+        for row in categories
+    )
+    vendor_items = "".join(
+        f"<li><strong>{_h(row['vendor'])}</strong>: "
+        f"{_h(_usd(row['total_exposure']))} exposure, "
+        f"{_h(_usd(row['spend']))} spend, {row['findings']} findings</li>"
+        for row in vendors
+    )
+    finding_items = "".join(
+        "<li>"
+        f"<strong>{_h(row['severity'])}/{_h(row['kind'])}</strong>: "
+        f"{_h(row['invoice'])} "
+        f"{'invoice' if row['line'] is None else 'line ' + str(row['line'])} "
+        f"{_h(row['sku'])} — {_h(row['detail'])}"
+        "</li>"
+        for row in findings
+    ) or "<li>No open findings.</li>"
+    return f"""<!doctype html>
+<html>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#17181a">
+  <h1>Invoice Audit Executive Summary</h1>
+  <p><strong>Potential exposure:</strong> {_h(_usd(totals['total_exposure']))}
+     ({_h(_usd(totals['price_exposure']))} price; {_h(_usd(totals['policy_exposure']))} policy)</p>
+  <p><strong>Scanned spend:</strong> {_h(_usd(totals['spend']))}<br>
+     <strong>Invoices:</strong> {totals['invoices']} ·
+     <strong>Lines:</strong> {totals['lines']} ·
+     <strong>Open findings:</strong> {totals['findings']}</p>
+  <h2>Where money needs attention</h2>
+  <ul>{category_items}</ul>
+  <h2>Vendor focus</h2>
+  <ul>{vendor_items}</ul>
+  <h2>Top review items</h2>
+  <ul>{finding_items}</ul>
+  <h2>Recommended next action</h2>
+  <ul>
+    <li>Review money and policy findings first, starting with the largest exposure.</li>
+    <li>Connect revenue, work-order, production, or job-cost data next for margin/profit reporting.</li>
+  </ul>
+  <p style="color:#6e737d">Generated from the signed audit receipt and SQLite evidence store.</p>
+</body>
+</html>
+"""
+
+
+def write_email_draft(
+    con: sqlite3.Connection,
+    out_path: Path,
+    *,
+    to_addr: str = "",
+    from_addr: str = "invoice-audit@local",
+    attach_report: Path | None = None,
+) -> Path:
+    totals = overview(con)
+    msg = EmailMessage()
+    msg["Subject"] = (
+        f"Invoice Audit Summary — {_usd(totals['total_exposure'])} "
+        "potential exposure"
+    )
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Date"] = formatdate(localtime=True)
+    msg.set_content(executive_report_text(con))
+    msg.add_alternative(executive_report_html(con), subtype="html")
+    if attach_report and attach_report.exists():
+        msg.add_attachment(
+            attach_report.read_bytes(),
+            maintype="text",
+            subtype="html",
+            filename=attach_report.name,
+        )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(msg.as_string())
     return out_path
 
 
@@ -559,3 +757,7 @@ def _usd(value: float) -> str:
 
 def _h(value: object) -> str:
     return html.escape(str(value), quote=True)
+
+
+def _utc_now() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

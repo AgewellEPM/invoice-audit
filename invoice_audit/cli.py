@@ -8,6 +8,9 @@
   python3 -m invoice_audit export --db business.sqlite --out exports/
   python3 -m invoice_audit report --db business.sqlite --out report.html
   python3 -m invoice_audit slack-payload --db business.sqlite --out slack.json
+  python3 -m invoice_audit email-draft --db business.sqlite --out boss-summary.eml
+  python3 -m invoice_audit integration-payload --db business.sqlite --out api.json
+  python3 -m invoice_audit send-webhook --db business.sqlite --url <zapier-hook-url>
   python3 -m invoice_audit watch <scans-dir> --pricebook <csv|sqlite> --db business.sqlite
   python3 -m invoice_audit verify <receipt.json>
 """
@@ -18,7 +21,9 @@ import json
 import sys
 from pathlib import Path
 
-from .analytics import analytics_text, export_csv, write_html_report, write_slack_payload
+from .analytics import (
+    analytics_text, export_csv, send_webhook, write_email_draft,
+    write_html_report, write_integration_payload, write_slack_payload)
 from .analyst import answer_question
 from .audit import audit_folder
 from .ocr import AuditError
@@ -71,6 +76,22 @@ def main(argv: list[str] | None = None) -> int:
     sp = sub.add_parser("slack-payload", help="write Slack-ready JSON without sending it")
     sp.add_argument("--db", type=Path, required=True)
     sp.add_argument("--out", type=Path, required=True)
+
+    ed = sub.add_parser("email-draft", help="write a boss-ready .eml draft")
+    ed.add_argument("--db", type=Path, required=True)
+    ed.add_argument("--out", type=Path, required=True)
+    ed.add_argument("--to", default="")
+    ed.add_argument("--from-addr", default="invoice-audit@local")
+    ed.add_argument("--attach-report", type=Path, default=None)
+
+    ip = sub.add_parser("integration-payload", help="write generic API/Zapier JSON")
+    ip.add_argument("--db", type=Path, required=True)
+    ip.add_argument("--out", type=Path, required=True)
+
+    wh = sub.add_parser("send-webhook", help="send generic API/Zapier JSON to a webhook URL")
+    wh.add_argument("--db", type=Path, required=True)
+    wh.add_argument("--url", required=True)
+    wh.add_argument("--timeout", type=float, default=10.0)
 
     w = sub.add_parser("watch", help="continuously audit when sources change")
     w.add_argument("scans_dir", type=Path)
@@ -159,6 +180,27 @@ def main(argv: list[str] | None = None) -> int:
                 path = write_slack_payload(con, args.out)
             print(path)
             return 0
+        if args.cmd == "email-draft":
+            with connect(args.db) as con:
+                path = write_email_draft(
+                    con,
+                    args.out,
+                    to_addr=args.to,
+                    from_addr=args.from_addr,
+                    attach_report=args.attach_report,
+                )
+            print(path)
+            return 0
+        if args.cmd == "integration-payload":
+            with connect(args.db) as con:
+                path = write_integration_payload(con, args.out)
+            print(path)
+            return 0
+        if args.cmd == "send-webhook":
+            with connect(args.db) as con:
+                result = send_webhook(con, args.url, timeout=args.timeout)
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result.get("ok") else 1
         if args.cmd == "watch":
             if args.once:
                 result = run_once_if_changed(
@@ -201,6 +243,9 @@ def main(argv: list[str] | None = None) -> int:
                   + ("" if args.no_rehash else ", input hashes match"))
             return 0
     except AuditError as e:
+        print(f"invoice-audit: {e}", file=sys.stderr)
+        return 2
+    except ValueError as e:
         print(f"invoice-audit: {e}", file=sys.stderr)
         return 2
     return 0

@@ -76,6 +76,10 @@ python3 -m invoice_audit analytics --db business.sqlite
 python3 -m invoice_audit export --db business.sqlite --out exports/
 python3 -m invoice_audit report --db business.sqlite --out business-report.html
 python3 -m invoice_audit slack-payload --db business.sqlite --out slack.json
+python3 -m invoice_audit email-draft --db business.sqlite --out boss-summary.eml \
+                                     --attach-report business-report.html
+python3 -m invoice_audit integration-payload --db business.sqlite --out api.json
+python3 -m invoice_audit send-webhook --db business.sqlite --url <zapier-hook-url>
 python3 -m invoice_audit watch <scans-dir> --pricebook <history.csv|.sqlite> \
                                            --db business.sqlite [--once]
 python3 -m invoice_audit verify <receipt.json>   # re-check signature + input hashes
@@ -97,6 +101,10 @@ python3 -m invoice_audit verify <receipt.json>   # re-check signature + input ha
   `export` writes CSVs for finance/ops; `report` writes a standalone visual HTML
   report; `slack-payload` writes a safe JSON message but does not post anywhere
   until a webhook is explicitly configured.
+- **Share/connect outputs:** `email-draft` writes a boss-ready `.eml` with the
+  executive summary and optional attached HTML report; `integration-payload`
+  writes generic API/Zapier JSON; `send-webhook` posts that JSON only when a
+  webhook URL is explicitly supplied.
 - **Revenue/profit boundary:** this database currently proves AP invoice spend,
   discrepancy exposure, vendors, categories, OCR evidence, and policy leaks. To
   answer “where are we making the most money,” connect sales, work orders,
@@ -118,8 +126,8 @@ The SwiftUI app opens directly into the audit workspace: choose invoice/PDF
 sources, choose a price-history CSV/SQLite file, run the audit, inspect the
 scan plus OCR-to-digital conversion, review flagged findings, verify the
 receipt, ask the SQL-backed business analyst follow-up questions, open the
-visual business report, and reveal both the signed JSON artifact and SQLite
-database.
+visual business report, generate a boss-ready email draft, export an API file,
+or paste a Zapier/webhook URL and send the business report JSON.
 
 On Windows 11, use the native launcher:
 
@@ -129,7 +137,8 @@ powershell -ExecutionPolicy Bypass -File scripts\run_windows_native.ps1
 ```
 
 That shell uses native Windows controls and the same Tesseract-backed OCR path
-as `scripts\run_windows.ps1`.
+as `scripts\run_windows.ps1`, with the same report, email draft, API file, and
+Zapier/webhook send actions.
 
 ## Demo (real OCR, planted cases)
 
@@ -153,7 +162,7 @@ survives `verify` and fails the instant a scan / pricebook / rules byte changes.
 ## Status — PILOT-READY
 
 Happy path proven end-to-end on real (rendered) scans and PDF-rendered pages;
-fail-closed on the error paths; **41/41 tests green** (each stage + the
+fail-closed on the error paths; **43/43 tests green** (each stage + the
 grounding ladder + every floor outcome pinned per-site); receipts sign / verify
 / tamper-detect over scans, original PDFs, pricebook, **and** the taught-rules
 file.
@@ -166,9 +175,10 @@ file.
   the natural place to add it (two engines = the second read).
 - **Deep-legacy price history** (trapped in an app with no export) uses the
   Perslis VM+OCR screen-read path — real but not wired into this engine yet.
-- **Connectors beyond local files** (ERP APIs, email inboxes, network shares,
-  app databases) are not wired yet. Current sources are local PDFs/images plus
-  CSV/SQLite price history.
+- **Inbound connectors beyond local files** (ERP APIs, email inboxes, network
+  shares, app databases) are not wired yet. Current sources are local PDFs/images
+  plus CSV/SQLite price history. Outbound sharing is available through email
+  draft, CSV/report export, and generic webhook JSON.
 - **Layout coverage:** tuned for standard QTY/DESC/UNIT/TOTAL tables; odd vendor
   layouts and OCR-garbled headers/totals fail closed, they don't guess.
 - Not integrated with the kist approval loop / remote-session model yet.
