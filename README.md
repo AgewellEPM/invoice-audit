@@ -148,24 +148,32 @@ scripts/run_swift_app.sh
 scripts/build_swift_app.sh              # creates dist/Invoice Audit.app
 ```
 
-The SwiftUI app opens into a dark, step-based workspace:
+The SwiftUI app now frames the demo as **Financial Ops Copilot**: invoice audit
+is the first investigative capability, not the whole product.
 
-0. **Pulse** — the first-page SOS dashboard: money at risk, data rot, review
-   priorities, recent audit history, category/vendor exposure, and next actions.
-1. **Sources** — choose invoice/PDF folder, Excel/CSV price sheets, and confirm
-   the connected SQLite evidence database. The Sources screen also exposes the
+The five persistent areas are:
+
+0. **Today** — the morning financial briefing: deterministic money at risk,
+   missing AP/AR feeds called out honestly, urgent work items, recent history,
+   category/vendor exposure, and a “follow the dollar” trace from exposure back
+   to invoice/vendor/line/source evidence.
+1. **Money** — choose invoice/PDF folder, Excel/CSV price sheets, and confirm
+   the connected SQLite evidence database. The Money screen also exposes the
    local **Legacy VM/RM bridge** for old payroll, RM, ERP, or plant computers.
    It probes Kist Work Agent at `http://127.0.0.1:8765`, the active
    `/api/vm-stage-status`/scan endpoints, and local Perslis/RM/QEMU processes
    so the UI can show the real Win11/legacy VM attachment before extracted PDFs,
    CSV, Excel, or API JSON are imported here.
-2. **Audit** — run OCR/extraction/price checks and create the receipt/report.
-3. **Review** — inspect scan, OCR read, digital line items, and findings.
-4. **Save / Export** — save reports, CSVs, boss-ready email drafts,
-   API/Zapier payloads, webhook sends, and the local app/query journals.
-5. **Query** — ask the SQL-backed business analyst follow-up questions and see
-   persisted past searches plus the full daily activity journal: what ran,
-   what was achieved, what was learned, and what failed. The advisor is also
+2. **Investigate** — run OCR/extraction/price checks and create the signed
+   receipt/report. The LLM can extract, normalize, classify, search, and explain;
+   deterministic software calculates price variance, exposure, grounding, and
+   policy failures whenever source evidence exists.
+3. **Work** — save reports, CSVs, boss-ready email drafts, API/Zapier payloads,
+   webhook sends, review records, and local app/query journals.
+4. **Ask** — ask the SQL-backed financial analyst follow-up questions and see
+   persisted past searches plus the full daily activity journal: what ran, what
+   was achieved, what was learned, and what failed. Answers should drill into
+   receipts, calculations, transactions, and source records. The advisor is also
    available as a slideout from the top bar.
 
 Advanced source connectors, market benchmarks, rules, share/export, webhook
@@ -209,7 +217,7 @@ survives `verify` and fails the instant a scan / pricebook / rules byte changes.
 ## Status — PILOT-READY
 
 Happy path proven end-to-end on real (rendered) scans and PDF-rendered pages;
-fail-closed on the error paths; **49/49 tests green** (each stage + the
+fail-closed on the error paths; **50/50 tests green** (each stage + the
 grounding ladder + every floor outcome pinned per-site); receipts sign / verify
 / tamper-detect over scans, original PDFs, pricebook, market benchmark, **and**
 the taught-rules file.

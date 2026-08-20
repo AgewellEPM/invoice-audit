@@ -12,11 +12,21 @@ from .analytics import analytics_text, category_summary, overview, vendor_summar
 
 def answer_question(con: sqlite3.Connection, question: str) -> str:
     q = question.lower()
-    if any(term in q for term in ("summary", "status", "overview", "what changed")):
+    if any(term in q for term in (
+        "today", "deal with", "do first", "what should i do", "needs attention",
+        "anything weird",
+    )):
+        return _today_answer(con)
+    if any(term in q for term in ("trace", "follow the dollar", "follow this", "lineage")):
+        return _trace_answer(con)
+    if any(term in q for term in (
+        "summary", "status", "overview", "what changed", "tell the owner",
+        "tell my boss",
+    )):
         return _summary(con)
     if any(term in q for term in ("category", "categories", "type", "types", "mapped")):
         return _category_answer(con)
-    if any(term in q for term in ("vendor", "supplier")):
+    if any(term in q for term in ("vendor", "supplier", "compare vendors")):
         return _vendor_answer(con)
     if any(term in q for term in ("profit", "revenue", "making the most", "make the most")):
         return _profit_gap_answer()
@@ -79,9 +89,9 @@ def _summary(con: sqlite3.Connection) -> str:
         f"- invoices: {totals['invoices']}\n"
         f"- lines checked: {totals['lines']}\n"
         f"- open findings: {totals['findings']} ({severity_text or 'none'})\n"
-        f"- potential overcharge: ${totals['exposure']:.2f}\n"
-        f"- policy exposure: ${exposure['policy_exposure']:.2f}\n"
-        f"- total exposure: ${exposure['total_exposure']:.2f}"
+        f"- potential overcharge: {_money(totals['exposure'])}\n"
+        f"- policy exposure: {_money(exposure['policy_exposure'])}\n"
+        f"- total exposure: {_money(exposure['total_exposure'])}"
     )
 
 
@@ -95,8 +105,10 @@ def _findings_answer(
 ) -> str:
     rows = con.execute(
         f"""
-        SELECT f.kind, f.severity, f.detail, i.file_name, i.path,
-               l.line_index, l.sku, l.description, l.unit_price, l.line_total
+        SELECT f.kind, f.severity, f.detail, i.file_name, i.path, i.vendor,
+               l.line_index, l.sku, l.description, l.qty, l.unit_price,
+               l.line_total, l.reference_median, l.delta_total,
+               l.policy_delta_total, l.matched_on
         FROM findings f
         LEFT JOIN invoices i ON i.id = f.invoice_id
         LEFT JOIN invoice_lines l ON l.id = f.line_id
@@ -119,11 +131,111 @@ def _findings_answer(
     for r in rows:
         line = "invoice" if r["line_index"] is None else f"line {r['line_index'] + 1}"
         sku = "" if not r["sku"] else f" ({r['sku']})"
+        evidence = _calculation_text(r)
         lines.append(
             f"- [{r['severity']}] {r['kind']} in {r['file_name']} {line}{sku}: "
-            f"{r['detail']} | source: {r['path']}"
+            f"{r['detail']}{evidence} | source: {r['path']}"
         )
     return "\n".join(lines)
+
+
+def _today_answer(con: sqlite3.Connection) -> str:
+    exposure = overview(con)
+    lines = [
+        "Today — financial morning briefing",
+        f"- at risk: {_money(exposure['total_exposure'])} "
+        f"(price {_money(exposure['price_exposure'])}; policy {_money(exposure['policy_exposure'])})",
+        "- due: connect AP/payables source to calculate bills requiring action",
+        "- incoming: connect AR/customer invoices to calculate expected cash",
+        "- cash impact: currently limited to deterministic leakage from connected invoice data",
+        "",
+        "Do first",
+    ]
+    findings = _ranked_findings(con, limit=4)
+    if not findings:
+        lines.append("- no open findings in the connected audit database")
+    for idx, finding in enumerate(findings, start=1):
+        exposure_amount = float(finding["delta_total"] or 0) + float(finding["policy_delta_total"] or 0)
+        action = "hold/review payment" if exposure_amount > 0 else "review evidence"
+        lines.append(
+            f"{idx}. {action}: {finding['file_name']} "
+            f"{_line_label(finding)} — {finding['detail']}{_calculation_text(finding)}"
+        )
+    return "\n".join(lines)
+
+
+def _trace_answer(con: sqlite3.Connection) -> str:
+    rows = _ranked_findings(con, limit=1)
+    if not rows:
+        return "Follow the dollar\n- no finding available to trace yet"
+    row = rows[0]
+    exposure_amount = float(row["delta_total"] or 0) + float(row["policy_delta_total"] or 0)
+    return "\n".join([
+        "Follow the dollar",
+        f"{_money(exposure_amount)} potential exposure",
+        f"→ finding: {row['kind']} / {row['severity']}",
+        f"→ invoice: {row['file_name']}",
+        f"→ vendor: {row['vendor'] or 'unknown vendor'}",
+        f"→ line: {_line_label(row)}",
+        f"→ deterministic calculation: {row['detail']}{_calculation_text(row)}",
+        f"→ original source: {row['path']}",
+        "→ next source layers to connect: PO → job/customer → payment/bank → recovery status",
+    ])
+
+
+def _ranked_findings(con: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
+    return con.execute(
+        """
+        SELECT f.kind, f.severity, f.detail, i.file_name, i.path, i.vendor,
+               l.line_index, l.sku, l.description, l.qty, l.unit_price,
+               l.line_total, l.reference_median, l.delta_total,
+               l.policy_delta_total, l.matched_on
+        FROM findings f
+        LEFT JOIN invoices i ON i.id = f.invoice_id
+        LEFT JOIN invoice_lines l ON l.id = f.line_id
+        WHERE f.receipt_id = (SELECT MAX(id) FROM receipts)
+        ORDER BY
+            (COALESCE(l.delta_total, 0) + COALESCE(l.policy_delta_total, 0)) DESC,
+            CASE f.severity
+                WHEN 'money' THEN 0
+                WHEN 'policy' THEN 1
+                WHEN 'evidence' THEN 2
+                ELSE 3
+            END,
+            f.id
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
+def _line_label(row: sqlite3.Row) -> str:
+    if row["line_index"] is None:
+        return "invoice-level issue"
+    sku = row["sku"] or ""
+    desc = row["description"] or ""
+    label = sku or desc or "line item"
+    return f"line {row['line_index'] + 1} {label}".strip()
+
+
+def _calculation_text(row: sqlite3.Row) -> str:
+    ref = row["reference_median"]
+    unit = row["unit_price"]
+    if ref in (None, 0) or unit is None:
+        return ""
+    variance = ((float(unit) - float(ref)) / float(ref)) * 100
+    exposure_amount = float(row["delta_total"] or 0) + float(row["policy_delta_total"] or 0)
+    matched = row["matched_on"] or "history"
+    return (
+        f" | calc: invoice unit {_money(unit)}, "
+        f"historical median {_money(ref)}, "
+        f"variance {variance:+.1f}%, exposure {_money(exposure_amount)}, "
+        f"matched {matched}"
+    )
+
+
+def _money(value: object) -> str:
+    return f"${float(value or 0):,.2f}"
 
 
 def _category_answer(con: sqlite3.Connection) -> str:

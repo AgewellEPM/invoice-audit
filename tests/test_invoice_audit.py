@@ -525,12 +525,21 @@ def test_sql_backed_analyst_answers_with_citations():
             store_receipt(con, receipt)
             summary = answer_question(con, "give me a business summary")
             assert "invoices: 3" in summary
-            assert "potential overcharge: $6060.00" in summary
+            assert "potential overcharge: $6,060.00" in summary
 
             exposure = answer_question(con, "show overcharges")
             assert "Money exposure" in exposure
             assert "invoice-30071.png" in exposure
+            assert "invoice unit $5,980.00" in exposure
+            assert "historical median $2,950.00" in exposure
+            assert "variance +102.7%" in exposure
+            assert "exposure $6,060.00" in exposure
             assert "source:" in exposure
+
+            trace = answer_question(con, "trace this dollar")
+            assert "Follow the dollar" in trace
+            assert "$6,060.00 potential exposure" in trace
+            assert "PO → job/customer → payment/bank → recovery status" in trace
 
             why = answer_question(con, "why was invoice-30073 flagged?")
             assert "Findings for invoice-30073.png" in why
@@ -568,13 +577,14 @@ def test_analytics_exports_and_visual_report_map_business_exposure():
             assert journal["status"] == "SOS: money at risk"
             assert journal["overview"]["total_exposure"] == 6228.0
             assert journal["recent_runs"][0]["invoices"] == 3
-            assert "possible leakage" in journal["attention"][0]["title"]
-            assert "Review largest money/policy exposure" in journal["next_actions"][0]
+            assert journal["attention"][0]["title"] == "HOLD $6,060.00 UNTIL REVIEWED"
+            assert journal["attention"][0]["action"] == "Trace dollars"
+            assert "Trace largest exposure" in journal["next_actions"][0]
             assert "SOS Attention Journal" in history_text(con)
 
             report = write_html_report(con, root / "business-report.html")
             html = report.read_text()
-            assert "Invoice Audit Business Map" in html
+            assert "Financial Ops Copilot Business Map" in html
             assert "Where money is leaking by category" in html
             assert "Sensors &amp; Controls" in html
 
@@ -587,7 +597,7 @@ def test_analytics_exports_and_visual_report_map_business_exposure():
             assert "Hydraulics" in (root / "exports" / "category_summary.csv").read_text()
 
             payload = slack_payload(con)
-            assert "Invoice Audit: 3 invoices" in payload["text"]
+            assert "Financial Ops Copilot: 3 invoices" in payload["text"]
             assert "$6,228.00 potential exposure" in payload["text"]
 
 
@@ -609,16 +619,16 @@ def test_share_outputs_create_boss_email_and_api_payload():
             payload_path = write_integration_payload(con, root / "api-payload.json")
 
             email_text = email.read_text()
-            assert "Subject: Invoice Audit Summary" in email_text
+            assert "Subject: Financial Ops Copilot Summary" in email_text
             assert "boss@example.com" in email_text
-            assert "Invoice Audit Executive Summary" in email_text
+            assert "Financial Ops Copilot" in email_text
             assert "business-report.html" in email_text
 
             payload = json.loads(payload_path.read_text())
             assert payload["event_type"] == "invoice_audit.business_report.v1"
             assert payload["overview"]["total_exposure"] == 6228.0
             assert payload["categories"][0]["category"] == "Hydraulics"
-            assert "Invoice Audit Executive Summary" in payload["message"]
+            assert "Financial Ops Copilot" in payload["message"]
 
 
 def test_webhook_sender_posts_business_report_json():

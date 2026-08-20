@@ -339,7 +339,7 @@ def slack_payload(con: sqlite3.Connection) -> dict:
     categories = category_summary(con)[:5]
     findings = top_findings(con, limit=5)
     lines = [
-        f"Invoice Audit: {totals['invoices']} invoices, "
+        f"Financial Ops Copilot: {totals['invoices']} invoices, "
         f"{totals['findings']} findings, "
         f"{_usd(totals['total_exposure'])} potential exposure."
     ]
@@ -432,7 +432,7 @@ def executive_report_text(con: sqlite3.Connection) -> str:
     vendors = vendor_summary(con)[:6]
     findings = top_findings(con, limit=8)
     lines = [
-        "Invoice Audit Executive Summary",
+        "Financial Ops Copilot — Invoice Investigation Summary",
         "",
         f"Scanned invoices: {totals['invoices']}",
         f"Lines checked: {totals['lines']}",
@@ -506,7 +506,7 @@ def executive_report_html(con: sqlite3.Connection) -> str:
     return f"""<!doctype html>
 <html>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#17181a">
-  <h1>Invoice Audit Executive Summary</h1>
+  <h1>Financial Ops Copilot — Invoice Investigation Summary</h1>
   <p><strong>Potential exposure:</strong> {_h(_usd(totals['total_exposure']))}
      ({_h(_usd(totals['price_exposure']))} price; {_h(_usd(totals['policy_exposure']))} policy)</p>
   <p><strong>Scanned spend:</strong> {_h(_usd(totals['spend']))}<br>
@@ -541,7 +541,7 @@ def write_email_draft(
     totals = overview(con)
     msg = EmailMessage()
     msg["Subject"] = (
-        f"Invoice Audit Summary — {_usd(totals['total_exposure'])} "
+        f"Financial Ops Copilot Summary — {_usd(totals['total_exposure'])} "
         "potential exposure"
     )
     msg["From"] = from_addr
@@ -578,7 +578,7 @@ def write_html_report(con: sqlite3.Connection, out_path: Path) -> Path:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Invoice Audit Business Map</title>
+<title>Financial Ops Copilot Business Map</title>
 <style>
 :root {{
   --bg: #f5f5f7;
@@ -633,7 +633,7 @@ td {{ padding: 12px 8px; border-top: 1px solid var(--line); vertical-align: top;
 <body>
 <main>
   <header>
-    <h1>Invoice Audit Business Map</h1>
+    <h1>Financial Ops Copilot Business Map</h1>
     <p>Extraction is now connected to categories, SQL rollups, findings, evidence, and export targets. Revenue/profit views require sales, work-order, or production data that is not connected yet.</p>
   </header>
 
@@ -849,16 +849,37 @@ def _attention_items(
 ) -> list[dict]:
     items: list[dict] = []
     if totals["total_exposure"] > 0:
-        category = categories[0]["category"] if categories else "uncategorized spend"
-        vendor = vendors[0]["vendor"] if vendors else "unknown vendor"
-        items.append({
-            "priority": "high",
-            "title": f"{_usd(totals['total_exposure'])} possible leakage",
-            "detail": (
-                f"Largest visible risk is around {category}; top vendor focus is {vendor}."
+        money = next(
+            (
+                finding for finding in findings
+                if finding["price_exposure"] + finding["policy_exposure"] > 0
             ),
-            "action": "Review money and policy findings first",
-        })
+            None,
+        )
+        if money:
+            exposure = money["price_exposure"] + money["policy_exposure"]
+            item = money["sku"] or money["description"] or money["invoice"]
+            items.append({
+                "priority": "high",
+                "title": f"HOLD {_usd(exposure)} UNTIL REVIEWED",
+                "detail": (
+                    f"{item} on {money['invoice']}: {money['detail']}. "
+                    "Evidence comes from deterministic invoice extraction, "
+                    "purchase-history comparison, and the original source file."
+                ),
+                "action": "Trace dollars",
+            })
+        else:
+            category = categories[0]["category"] if categories else "uncategorized spend"
+            vendor = vendors[0]["vendor"] if vendors else "unknown vendor"
+            items.append({
+                "priority": "high",
+                "title": f"{_usd(totals['total_exposure'])} possible leakage",
+                "detail": (
+                    f"Largest visible risk is around {category}; top vendor focus is {vendor}."
+                ),
+                "action": "Review money and policy findings first",
+            })
     if (data_quality.get("issue_count") or 0) > 0:
         items.append({
             "priority": "high",
@@ -889,7 +910,8 @@ def _attention_items(
 def _next_actions(totals: dict, findings: list[dict], data_quality: dict) -> list[str]:
     actions: list[str] = []
     if totals["total_exposure"] > 0:
-        actions.append("Review largest money/policy exposure before approving payment.")
+        actions.append("Trace largest exposure from dollar → invoice → vendor → line → source scan.")
+        actions.append("Record the accountant decision: hold, approve, request credit, or mark recovered.")
     if any(f["kind"] == "no-reference" for f in findings):
         actions.append("Add missing purchase-history references for no-reference items.")
     if any(f["severity"] == "evidence" for f in findings):

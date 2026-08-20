@@ -53,8 +53,8 @@ final class AuditModel: ObservableObject {
     @Published var rulesURL: URL?
     @Published var sourceAPIURL = ""
     @Published var connectorStatus = "Local folder, network folder, email export, and API/Zapier sources are supported."
-    @Published var analystQuestion = "show overcharges"
-    @Published var analystAnswer = "Run an audit, then ask about overcharges, policy exceptions, OCR evidence, missing history, or a specific invoice."
+    @Published var analystQuestion = "what should I deal with today?"
+    @Published var analystAnswer = "Run an audit, then ask what needs attention, trace this dollar, compare vendors, show overcharges, or explain a specific invoice. Answers come from SQL evidence and show their calculations."
     @Published var analystIsRunning = false
     @Published var webhookURL = ""
     @Published var shareStatus = "Generate an email draft or paste a Zapier webhook URL."
@@ -142,8 +142,8 @@ final class AuditModel: ObservableObject {
         loadAppJournal()
         logActivity(
             kind: "app-open",
-            title: "Opened Invoice Audit",
-            detail: "Loaded the native workspace and checked for prior evidence.",
+            title: "Opened Financial Ops Copilot",
+            detail: "Loaded the native workspace and checked for prior financial evidence.",
             outcome: "started"
         )
         if FileManager.default.fileExists(atPath: receiptURL.path) {
@@ -424,7 +424,7 @@ final class AuditModel: ObservableObject {
         1. Open Kist Work Agent at http://127.0.0.1:8765.
         2. Log into the legacy VM/RM system and extract invoices, payroll, or database exports.
         3. Save extracted PDFs/images/CSV/Excel/API JSON into a source folder.
-        4. Return to Invoice Audit > Sources and choose the extracted folder + Excel price data.
+        4. Return to Financial Ops Copilot > Money and choose the extracted folder + Excel price data.
         5. Run Audit to create signed receipts, SQL evidence, and exportable reports.
         """
         NSPasteboard.general.clearContents()
@@ -1589,6 +1589,8 @@ struct InvoiceLineView: Identifiable {
     let confidence: Double
     let category: String
     let policyExposure: Double
+    let referenceMedian: Double?
+    let priceExposure: Double
     let grounding: String
     let verdict: String
 
@@ -1603,6 +1605,8 @@ struct InvoiceLineView: Identifiable {
         confidence = json["ocr_min_confidence"] as? Double ?? 0
         category = json["category"] as? String ?? "Uncategorized"
         policyExposure = json["policy_delta_total"] as? Double ?? 0
+        referenceMedian = jsonDoubleOptional(json, "reference_median")
+        priceExposure = json["delta_total"] as? Double ?? 0
         let groundingObj = json["grounding"] as? [String: Any] ?? [:]
         grounding = groundingObj["verdict"] as? String ?? "unknown"
         verdict = json["verdict"] as? String ?? "unknown"
@@ -1614,6 +1618,7 @@ struct FindingView: Identifiable {
     let invoice: String
     let kind: String
     let line: String
+    let lineIndex: Int?
     let detail: String
     let severity: Severity
     let invoiceImageURL: URL?
@@ -1623,8 +1628,10 @@ struct FindingView: Identifiable {
         kind = json["kind"] as? String ?? "review"
         if let n = json["line"] as? Int {
             line = "Line \(n + 1)"
+            lineIndex = n
         } else {
             line = "Invoice"
+            lineIndex = nil
         }
         detail = json["detail"] as? String ?? "Needs review"
         id = "\(invoice)-\(kind)-\(index)"
@@ -1634,7 +1641,7 @@ struct FindingView: Identifiable {
     }
 }
 
-enum Severity {
+enum Severity: Equatable {
     case money
     case policy
     case evidence
@@ -1670,14 +1677,29 @@ enum Severity {
 }
 
 enum WorkflowStep: String, CaseIterable, Identifiable {
-    case pulse = "Pulse"
-    case sources = "Sources"
-    case audit = "Audit"
+    case pulse = "Today"
+    case sources = "Money"
+    case audit = "Investigate"
     case review = "Review"
-    case saveExport = "Save / Export"
-    case query = "Query"
+    case saveExport = "Work"
+    case query = "Ask"
+
+    static var allCases: [WorkflowStep] {
+        [.pulse, .sources, .audit, .saveExport, .query]
+    }
 
     var id: String { rawValue }
+
+    var badge: String {
+        switch self {
+        case .pulse: "TODAY"
+        case .sources: "1"
+        case .audit: "2"
+        case .review: "2A"
+        case .saveExport: "3"
+        case .query: "4"
+        }
+    }
 
     var index: Int {
         switch self {
@@ -1692,22 +1714,22 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .pulse: "SOS attention"
-        case .sources: "connect data"
-        case .audit: "run checks"
-        case .review: "inspect risk"
-        case .saveExport: "save data"
+        case .pulse: "morning brief"
+        case .sources: "map data"
+        case .audit: "find leakage"
+        case .review: "inspect evidence"
+        case .saveExport: "act/export"
         case .query: "ask analyst"
         }
     }
 
     var systemImage: String {
         switch self {
-        case .pulse: "dot.radiowaves.left.and.right"
-        case .sources: "folder.badge.gearshape"
-        case .audit: "play.circle.fill"
+        case .pulse: "sun.max.fill"
+        case .sources: "dollarsign.circle"
+        case .audit: "point.3.connected.trianglepath.dotted"
         case .review: "checklist.checked"
-        case .saveExport: "square.and.arrow.up"
+        case .saveExport: "checkmark.seal"
         case .query: "bubble.left.and.text.bubble.right"
         }
     }
@@ -1817,11 +1839,13 @@ struct WizardSidebar: View {
                             .fill(AppTheme.blue)
                             .frame(width: 6, height: 6)
                     )
-                Text("INVOICE")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                Text("AUDIT")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .foregroundStyle(AppTheme.blue)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("FINANCIAL")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                    Text("OPS COPILOT")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(AppTheme.blue)
+                }
             }
             .padding(.top, 24)
 
@@ -1835,7 +1859,7 @@ struct WizardSidebar: View {
             .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 14))
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("WORKFLOW")
+                Text("AREAS")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundStyle(AppTheme.muted)
                 ForEach(WorkflowStep.allCases) { item in
@@ -1843,9 +1867,9 @@ struct WizardSidebar: View {
                         selected = item
                     } label: {
                         HStack(spacing: 10) {
-                            Text(item == .pulse ? "SOS" : "\(item.index)")
+                            Text(item.badge)
                                 .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .frame(width: item == .pulse ? 34 : 22, height: 22)
+                                .frame(width: item == .pulse ? 50 : 24, height: 22)
                                 .background(selected == item ? AppTheme.blue : AppTheme.panel2, in: Capsule())
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.rawValue)
@@ -1931,7 +1955,7 @@ struct WizardTopBar: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(AppTheme.muted)
-                Text("Search invoices, vendors, findings, and memory...")
+                Text("Search money, vendors, jobs, findings, and memory...")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppTheme.muted)
                     .lineLimit(1)
@@ -1981,9 +2005,9 @@ struct PulseStepView: View {
             VStack(alignment: .leading, spacing: 20) {
                 HStack(alignment: .top) {
                     WizardTitle(
-                        eyebrow: "SOS attention",
-                        title: "What needs your pulse right now",
-                        subtitle: "This is the first screen: current money risk, data rot, review priorities, recent audit history, and the next concrete action."
+                        eyebrow: "Today",
+                        title: "Good morning. Here's what needs attention.",
+                        subtitle: "A financial morning briefing from connected evidence: deterministic money risk first, missing feeds called out clearly, and every AI explanation traceable back to source records."
                     )
                     Spacer()
                     VStack(alignment: .trailing, spacing: 8) {
@@ -1997,11 +2021,33 @@ struct PulseStepView: View {
                 }
 
                 HStack(spacing: 14) {
-                    DarkMetricCard(title: "Money at risk", value: dollars(model.journal.overview.totalExposure), color: model.journal.overview.totalExposure > 0 ? AppTheme.red : AppTheme.green)
-                    DarkMetricCard(title: "Scanned spend", value: dollars(model.journal.overview.spend), color: AppTheme.blue)
-                    DarkMetricCard(title: "Open findings", value: "\(model.journal.overview.findings)", color: model.journal.overview.findings > 0 ? AppTheme.orange : AppTheme.green)
-                    DarkMetricCard(title: "Data rot", value: dataRotText, color: (model.journal.dataQualityIssues ?? 0) > 0 ? AppTheme.red : AppTheme.green)
+                    MorningMetricCard(
+                        title: "AT RISK",
+                        value: dollars(model.journal.overview.totalExposure),
+                        detail: "Deterministic price + policy exposure",
+                        color: model.journal.overview.totalExposure > 0 ? AppTheme.red : AppTheme.green
+                    )
+                    MorningMetricCard(
+                        title: "DUE",
+                        value: "Connect AP",
+                        detail: "Payables feed not connected yet",
+                        color: AppTheme.orange
+                    )
+                    MorningMetricCard(
+                        title: "INCOMING",
+                        value: "Connect AR",
+                        detail: "Receivables feed not connected yet",
+                        color: AppTheme.blue
+                    )
+                    MorningMetricCard(
+                        title: "CASH IMPACT",
+                        value: cashImpactText,
+                        detail: "Known leakage only until AP/AR is live",
+                        color: model.journal.overview.totalExposure > 0 ? AppTheme.red : AppTheme.green
+                    )
                 }
+
+                MoneyLineagePanel(reviewAction: reviewAction)
 
                 HStack(alignment: .top, spacing: 16) {
                     DarkPanel {
@@ -2056,8 +2102,8 @@ struct PulseStepView: View {
 
                         DarkPanel {
                             VStack(alignment: .leading, spacing: 12) {
-                                SectionHeader(title: "Advisor", systemImage: "bubble.left.and.text.bubble.right.fill")
-                                Text("Open the side advisor while you set up sources, review evidence, or prepare the boss report.")
+                                SectionHeader(title: "Ask anything about the money", systemImage: "bubble.left.and.text.bubble.right.fill")
+                                Text("The advisor answers from SQL evidence. Ask: what should I deal with today, trace this dollar, where are we leaking money, compare vendors, or what should I tell the owner.")
                                     .font(.system(size: 12, weight: .medium))
                                     .foregroundStyle(AppTheme.muted)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -2128,6 +2174,151 @@ struct PulseStepView: View {
     private var dataRotText: String {
         guard let count = model.journal.dataQualityIssues else { return "—" }
         return "\(count)"
+    }
+
+    private var cashImpactText: String {
+        let exposure = model.journal.overview.totalExposure
+        if exposure <= 0 {
+            return "$0"
+        }
+        return "-\(dollars(exposure))"
+    }
+}
+
+struct MoneyLineagePanel: View {
+    @EnvironmentObject private var model: AuditModel
+    let reviewAction: () -> Void
+
+    var body: some View {
+        DarkPanel {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    SectionHeader(title: "Follow the dollar", systemImage: "arrow.triangle.branch")
+                    Spacer()
+                    Button {
+                        model.analystQuestion = "trace this dollar"
+                        Task { await model.askAnalyst() }
+                    } label: {
+                        Label("Ask trace", systemImage: "sparkles")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!model.canAskAnalyst)
+                }
+
+                if let trace = currentTrace {
+                    HStack(alignment: .top, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(dollars(trace.exposure))
+                                .font(.system(size: 28, weight: .bold, design: .rounded))
+                                .foregroundStyle(trace.exposure > 0 ? AppTheme.red : AppTheme.green)
+                            Text("potential exposure")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(AppTheme.muted)
+                            Text("Software calculates the variance. The AI explains and helps navigate the evidence.")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.76))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(width: 220, alignment: .leading)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            LineageNode(label: "Dollar", value: "\(dollars(trace.exposure)) flagged exposure")
+                            LineageNode(label: "Invoice", value: "\(trace.invoice.invoiceNo) · \(trace.invoice.file)")
+                            LineageNode(label: "Vendor", value: "\(trace.invoice.vendor) · \(trace.invoice.category)")
+                            LineageNode(label: "Line", value: trace.lineText)
+                            LineageNode(label: "Evidence", value: trace.evidenceText)
+                            LineageNode(label: "Next layers", value: "PO → job/customer → payment/bank → recovery status")
+                        }
+                    }
+
+                    HStack {
+                        Text(trace.finding.detail)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(AppTheme.muted)
+                            .lineLimit(2)
+                        Spacer()
+                        Button {
+                            reviewAction()
+                        } label: {
+                            Label("Trace in Review", systemImage: "doc.text.magnifyingglass")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                } else {
+                    Text("Run an audit to create the first traceable dollar path. AP/AR, job, customer, payroll, and bank layers become available as those sources are connected.")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(AppTheme.muted)
+                }
+            }
+        }
+    }
+
+    private var currentTrace: MoneyTrace? {
+        guard let receipt = model.receipt else { return nil }
+        let finding = receipt.findings.first(where: { $0.severity == .money }) ?? receipt.findings.first
+        guard let finding,
+              let invoice = receipt.invoices.first(where: { $0.file == finding.invoice }) else {
+            return nil
+        }
+        let line = finding.lineIndex.flatMap { index in
+            invoice.lines.first(where: { $0.id == index })
+        } ?? invoice.lines.first(where: { $0.verdict == "overcharge-flag" }) ?? invoice.lines.first
+        return MoneyTrace(finding: finding, invoice: invoice, line: line)
+    }
+}
+
+struct MoneyTrace {
+    let finding: FindingView
+    let invoice: InvoiceView
+    let line: InvoiceLineView?
+
+    var exposure: Double {
+        if let line {
+            return max(line.priceExposure + line.policyExposure, 0)
+        }
+        return 0
+    }
+
+    var lineText: String {
+        guard let line else {
+            return finding.line
+        }
+        return "\(line.sku.isEmpty ? line.description : line.sku) · qty \(number(line.qty)) · unit \(dollars(line.unitPrice)) · total \(dollars(line.lineTotal))"
+    }
+
+    var evidenceText: String {
+        guard let line else {
+            return "Original scan and review finding"
+        }
+        if let reference = line.referenceMedian, reference > 0 {
+            let variance = ((line.unitPrice - reference) / reference) * 100
+            return "Unit \(dollars(line.unitPrice)) vs median \(dollars(reference)) · variance \(signedPercent(variance)) · scan + SQL line"
+        }
+        return "No reference median connected for this line · scan + SQL line"
+    }
+}
+
+struct LineageNode: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(AppTheme.blue)
+                .frame(width: 82, alignment: .leading)
+            Text("→")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(AppTheme.muted)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.86))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
     }
 }
 
@@ -2296,9 +2487,9 @@ struct SourcesStepView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 WizardTitle(
-                    eyebrow: "Step 1",
-                    title: "Point the system at the data",
-                    subtitle: "Keep this simple: receipts/invoices, Excel price sheets, connected SQL evidence, and legacy VM/RM handoffs when the source system cannot export cleanly."
+                    eyebrow: "Money",
+                    title: "Build the financial map",
+                    subtitle: "Connect receipts/invoices, Excel price sheets, SQL evidence, and legacy VM/RM sources. This is the graph behind dollar → transaction → invoice → vendor → line item → source evidence."
                 )
 
                 HStack(spacing: 14) {
@@ -2550,9 +2741,9 @@ struct AuditStepView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             WizardTitle(
-                eyebrow: "Step 2",
-                title: "Run the audit",
-                subtitle: "OCR extracts line items, checks customer history and optional market/rule layers, then sends costly uncertainty to human review."
+                eyebrow: "Investigate",
+                title: "Find leakage with deterministic checks",
+                subtitle: "OCR and AI help extract and normalize. Software calculates price variance, policy exposure, grounding, and source evidence before anything reaches human review."
             )
 
             HStack(spacing: 16) {
@@ -2566,7 +2757,7 @@ struct AuditStepView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(model.status)
                         .font(.system(size: 17, weight: .semibold))
-                    Text("The app will create a signed receipt, SQLite evidence store, visual report, and review queue.")
+                    Text("The app will create a signed receipt, SQLite evidence store, visual report, follow-the-dollar trace, and review queue.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(AppTheme.muted)
 
@@ -2626,14 +2817,14 @@ struct ReviewStepView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             WizardTitle(
-                eyebrow: "Step 3",
-                title: "Review what needs human judgment",
-                subtitle: "High-cost uncertainty stays visible: invoice image, OCR read, digital line items, evidence, policy, and price findings."
+                eyebrow: "Evidence detail",
+                title: "Review the source trail",
+                subtitle: "High-cost uncertainty stays visible: invoice image, OCR read, digital line items, deterministic calculation, evidence, policy, and price findings."
             )
             if let receipt = model.receipt {
                 ContentView(receipt: receipt)
             } else {
-                EmptyDarkState(text: "No audit receipt yet. Run Step 2 first.")
+                EmptyDarkState(text: "No audit receipt yet. Run Investigate first.")
             }
         }
     }
@@ -2646,9 +2837,9 @@ struct SaveExportStepView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 WizardTitle(
-                    eyebrow: "Step 4",
-                    title: "Save, export, and send the data",
-                    subtitle: "Create the outputs leadership and downstream systems need: report, CSVs, email draft, API/Zapier payload, webhook send, and full app/query journals."
+                    eyebrow: "Work",
+                    title: "Act, export, and verify",
+                    subtitle: "Turn discoveries into outputs and actions: report, CSVs, email draft, API/Zapier payload, webhook send, review records, and full app/query journals."
                 )
 
                 HStack(spacing: 14) {
@@ -2767,9 +2958,9 @@ struct QueryStepView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 WizardTitle(
-                    eyebrow: "Query mode",
-                    title: "Ask the business analyst and review the work journal",
-                    subtitle: "Every analyst question and system action is saved with time, outcome, what was learned, and what failed. This is the LIST-style memory layer for the demo."
+                    eyebrow: "Ask",
+                    title: "Ask the financial analyst and review the work journal",
+                    subtitle: "Ask normal business questions. Answers must drill into receipts, calculations, transactions, and source records; every question/action is saved with time, outcome, what was learned, and what failed."
                 )
 
                 HStack(alignment: .top, spacing: 16) {
@@ -3072,6 +3263,39 @@ struct DarkMetricCard: View {
     }
 }
 
+struct MorningMetricCard: View {
+    let title: String
+    let value: String
+    let detail: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 10, weight: .black))
+                .foregroundStyle(color)
+                .tracking(0.8)
+            Text(value)
+                .font(.system(size: 25, weight: .bold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.94))
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+            Text(detail)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(AppTheme.muted)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 118, alignment: .leading)
+        .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(color.opacity(0.42), lineWidth: 1)
+        )
+    }
+}
+
 struct DarkPanel<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
@@ -3107,7 +3331,7 @@ struct HeaderView: View {
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("Invoice Audit")
+                Text("Financial Ops Copilot")
                     .font(.system(size: 26, weight: .semibold, design: .rounded))
                 Text(model.status)
                     .font(.system(size: 13, weight: .medium))
@@ -3674,17 +3898,18 @@ struct AnalystPanel: View {
     @EnvironmentObject private var model: AuditModel
 
     private let suggestions = [
-        "summary",
+        "what should I deal with today?",
+        "trace this dollar",
+        "where are we leaking money?",
+        "compare vendors",
         "show overcharges",
-        "policy exceptions",
-        "OCR evidence issues",
-        "missing price history",
+        "what should I tell the owner?",
     ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("Business Analyst", systemImage: "bubble.left.and.text.bubble.right")
+                Label("Financial Analyst", systemImage: "bubble.left.and.text.bubble.right")
                     .font(.system(size: 16, weight: .semibold))
                 Spacer()
                 if model.analystIsRunning {
@@ -3694,7 +3919,7 @@ struct AnalystPanel: View {
             }
 
             HStack(spacing: 8) {
-                TextField("Ask about discrepancies, vendors, evidence...", text: $model.analystQuestion)
+                TextField("Ask: what needs attention, trace this dollar, why did costs jump...", text: $model.analystQuestion)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit {
                         Task { await model.askAnalyst() }
@@ -3934,6 +4159,10 @@ func number(_ value: Double) -> String {
     return String(format: "%.2f", value)
 }
 
+func signedPercent(_ value: Double) -> String {
+    String(format: "%+.1f%%", value)
+}
+
 func appTimestamp() -> String {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -3951,6 +4180,22 @@ func jsonDouble(_ dict: [String: Any], _ key: String) -> Double {
         return parsed
     }
     return 0
+}
+
+func jsonDoubleOptional(_ dict: [String: Any], _ key: String) -> Double? {
+    if dict[key] is NSNull {
+        return nil
+    }
+    if let number = dict[key] as? NSNumber {
+        return number.doubleValue
+    }
+    if let value = dict[key] as? Double {
+        return value
+    }
+    if let value = dict[key] as? String, let parsed = Double(value) {
+        return parsed
+    }
+    return nil
 }
 
 func jsonInt(_ dict: [String: Any], _ key: String) -> Int? {
