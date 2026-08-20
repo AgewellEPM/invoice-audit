@@ -1,0 +1,6 @@
+bin/vision-ocr
+__pycache__/
+*.pyc
+demo/scans/
+demo/pricebook.csv
+.invoice-audit/

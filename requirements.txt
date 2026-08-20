@@ -1,0 +1,4 @@
+# stdlib + these two:
+cryptography   # Ed25519 receipt signing
+pillow         # demo fixture rendering only
+# OCR is native Swift (src/vision_ocr.swift → bin/vision-ocr), no python dep
