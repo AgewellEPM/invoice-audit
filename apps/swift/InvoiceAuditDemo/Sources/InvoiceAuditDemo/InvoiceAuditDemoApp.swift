@@ -60,15 +60,21 @@ final class AuditModel: ObservableObject {
     @Published var shareStatus = "Generate an email draft or paste a Zapier webhook URL."
     @Published var shareIsRunning = false
     @Published var journal = BusinessJournal.empty
+    @Published var activityJournal: [ActivityEvent] = []
+    @Published var queryHistory: [QueryHistoryItem] = []
+    @Published var legacyBridgeStatus = "Legacy VM/RM bridge not checked."
 
     private let repoRoot: URL
     private let receiptURL: URL
     private let dbURL: URL
     private let reportURL: URL
+    private let exportsURL: URL
     private let emailDraftURL: URL
     private let integrationPayloadURL: URL
     private let connectorConfigURL: URL
     private let connectorWorkspaceURL: URL
+    private let activityJournalURL: URL
+    private let queryHistoryURL: URL
 
     init() {
         let envRoot = ProcessInfo.processInfo.environment["INVOICE_AUDIT_ROOT"]
@@ -90,6 +96,9 @@ final class AuditModel: ObservableObject {
         reportURL = repoRoot
             .appendingPathComponent(".invoice-audit-app", isDirectory: true)
             .appendingPathComponent("business-report.html")
+        exportsURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("exports", isDirectory: true)
         emailDraftURL = repoRoot
             .appendingPathComponent(".invoice-audit-app", isDirectory: true)
             .appendingPathComponent("boss-summary.eml")
@@ -102,6 +111,12 @@ final class AuditModel: ObservableObject {
         connectorWorkspaceURL = repoRoot
             .appendingPathComponent(".invoice-audit-app", isDirectory: true)
             .appendingPathComponent("connector-workspace", isDirectory: true)
+        activityJournalURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("activity-journal.jsonl")
+        queryHistoryURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("query-history.jsonl")
     }
 
     var selectedInvoice: InvoiceView? {
@@ -123,6 +138,13 @@ final class AuditModel: ObservableObject {
     }
 
     func loadExistingReceipt() async {
+        loadAppJournal()
+        logActivity(
+            kind: "app-open",
+            title: "Opened Invoice Audit",
+            detail: "Loaded the native workspace and checked for prior evidence.",
+            outcome: "started"
+        )
         if FileManager.default.fileExists(atPath: receiptURL.path) {
             await loadReceipt(from: receiptURL)
             if hasBusinessDatabase {
@@ -171,9 +193,15 @@ final class AuditModel: ObservableObject {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK {
-            invoiceFolderURL = panel.url
+        if panel.runModal() == .OK, let url = panel.url {
+            invoiceFolderURL = url
             status = "Invoice folder selected"
+            logActivity(
+                kind: "source",
+                title: "Selected invoice source",
+                detail: url.path,
+                outcome: "learned source location"
+            )
         }
     }
 
@@ -196,9 +224,15 @@ final class AuditModel: ObservableObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK {
-            pricebookURL = panel.url
+        if panel.runModal() == .OK, let url = panel.url {
+            pricebookURL = url
             status = "Excel/CSV price sheet selected"
+            logActivity(
+                kind: "source",
+                title: "Selected Excel/price data",
+                detail: url.path,
+                outcome: "learned pricing source"
+            )
         }
     }
 
@@ -214,9 +248,15 @@ final class AuditModel: ObservableObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK {
-            marketURL = panel.url
+        if panel.runModal() == .OK, let url = panel.url {
+            marketURL = url
             status = "Market benchmark selected"
+            logActivity(
+                kind: "source",
+                title: "Selected market benchmark",
+                detail: url.path,
+                outcome: "optional benchmark connected"
+            )
         }
     }
 
@@ -232,9 +272,15 @@ final class AuditModel: ObservableObject {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK {
-            rulesURL = panel.url
+        if panel.runModal() == .OK, let url = panel.url {
+            rulesURL = url
             status = "Rules file selected"
+            logActivity(
+                kind: "source",
+                title: "Selected policy/rules file",
+                detail: url.path,
+                outcome: "learned rule source"
+            )
         }
     }
 
@@ -249,16 +295,34 @@ final class AuditModel: ObservableObject {
         marketURL = nil
         rulesURL = repoRoot.appendingPathComponent("demo/floor-rules.json")
         status = "Sample data selected"
+        logActivity(
+            kind: "source",
+            title: "Loaded sample data",
+            detail: "Demo scans, pricebook.csv, and floor-rules.json selected.",
+            outcome: "demo source ready"
+        )
     }
 
     func pullAPIConnector() async {
         let url = sourceAPIURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else {
             connectorStatus = "Paste an API/Zapier URL first."
+            logActivity(
+                kind: "source",
+                title: "API connector blocked",
+                detail: "No API/Zapier URL was provided.",
+                outcome: "failed"
+            )
             return
         }
         isRunning = true
         connectorStatus = "Pulling source data..."
+        logActivity(
+            kind: "source",
+            title: "Started API source pull",
+            detail: url,
+            outcome: "started"
+        )
         do {
             try FileManager.default.createDirectory(
                 at: connectorConfigURL.deletingLastPathComponent(),
@@ -280,11 +344,88 @@ final class AuditModel: ObservableObject {
             try loadConnectorManifest(from: output)
             connectorStatus = "Source data pulled. Run audit when ready."
             status = "Connector data ready"
+            logActivity(
+                kind: "source",
+                title: "Pulled API source data",
+                detail: output.trimmingCharacters(in: .whitespacesAndNewlines),
+                outcome: "learned source payload"
+            )
         } catch {
             connectorStatus = "Connector pull failed"
             transcript += "\nConnector pull failed: \(error.localizedDescription)"
+            logActivity(
+                kind: "source",
+                title: "API connector failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
         }
         isRunning = false
+    }
+
+    func openLegacyBridge() {
+        guard let url = URL(string: "http://127.0.0.1:8765") else { return }
+        NSWorkspace.shared.open(url)
+        legacyBridgeStatus = "Opened Kist Work Agent bridge in the browser."
+        logActivity(
+            kind: "legacy-bridge",
+            title: "Opened Legacy VM/RM bridge",
+            detail: "Opened http://127.0.0.1:8765 for VM/RM screen/database extraction.",
+            outcome: "handoff opened"
+        )
+    }
+
+    func checkLegacyBridge() async {
+        guard let url = URL(string: "http://127.0.0.1:8765") else { return }
+        do {
+            let (_, response) = try await URLSession.shared.data(from: url)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (200..<500).contains(code) {
+                legacyBridgeStatus = "Kist Work Agent bridge is reachable on 127.0.0.1:8765."
+                logActivity(
+                    kind: "legacy-bridge",
+                    title: "Checked Legacy VM/RM bridge",
+                    detail: "Local bridge responded with HTTP \(code).",
+                    outcome: "reachable"
+                )
+            } else {
+                legacyBridgeStatus = "Bridge responded unexpectedly: HTTP \(code)."
+                logActivity(
+                    kind: "legacy-bridge",
+                    title: "Legacy bridge check returned unexpected status",
+                    detail: "HTTP \(code)",
+                    outcome: "needs review"
+                )
+            }
+        } catch {
+            legacyBridgeStatus = "Bridge not reachable. Start Kist Work Agent / desktop-vision-console first."
+            logActivity(
+                kind: "legacy-bridge",
+                title: "Legacy VM/RM bridge not reachable",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
+        }
+    }
+
+    func copyLegacyBridgeInstructions() {
+        let text = """
+        Legacy VM/RM extraction handoff:
+        1. Open Kist Work Agent at http://127.0.0.1:8765.
+        2. Log into the legacy VM/RM system and extract invoices, payroll, or database exports.
+        3. Save extracted PDFs/images/CSV/Excel/API JSON into a source folder.
+        4. Return to Invoice Audit > Sources and choose the extracted folder + Excel price data.
+        5. Run Audit to create signed receipts, SQL evidence, and exportable reports.
+        """
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        legacyBridgeStatus = "Legacy bridge instructions copied."
+        logActivity(
+            kind: "legacy-bridge",
+            title: "Copied legacy bridge instructions",
+            detail: "Copied VM/RM extraction handoff steps to the clipboard.",
+            outcome: "saved instructions"
+        )
     }
 
     private func loadConnectorManifest(from text: String) throws {
@@ -318,6 +459,12 @@ final class AuditModel: ObservableObject {
         status = "Auditing selected invoices"
         verification = "Pending"
         transcript = ""
+        logActivity(
+            kind: "audit",
+            title: "Started audit",
+            detail: "Invoices: \(invoiceFolderURL.path); price data: \(pricebookURL.path)",
+            outcome: "started"
+        )
 
         do {
             try FileManager.default.createDirectory(
@@ -344,10 +491,24 @@ final class AuditModel: ObservableObject {
             await loadBusinessJournal()
             await askAnalyst()
             status = "Audit complete"
+            if let receipt {
+                logActivity(
+                    kind: "audit",
+                    title: "Completed audit",
+                    detail: "\(receipt.totals.invoices) invoices, \(receipt.totals.lines) lines, \(receipt.totals.flagged) findings, \(dollars(receipt.totals.potentialOvercharge + receipt.totals.policyOverage)) potential exposure.",
+                    outcome: "achieved"
+                )
+            }
         } catch {
             status = "Audit failed"
             verification = "Failed"
             transcript += "\n\(error.localizedDescription)"
+            logActivity(
+                kind: "audit",
+                title: "Audit failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
         }
 
         isRunning = false
@@ -366,9 +527,21 @@ final class AuditModel: ObservableObject {
                 ? "Verified"
                 : "Needs attention"
             transcript += output
+            logActivity(
+                kind: "verification",
+                title: "Verified receipt",
+                detail: output.trimmingCharacters(in: .whitespacesAndNewlines),
+                outcome: verification
+            )
         } catch {
             verification = "Failed"
             transcript += "\n\(error.localizedDescription)"
+            logActivity(
+                kind: "verification",
+                title: "Receipt verification failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
         }
     }
 
@@ -397,8 +570,20 @@ final class AuditModel: ObservableObject {
                 "--out", reportURL.path
             ])
             transcript += output
+            logActivity(
+                kind: "report",
+                title: "Generated visual report",
+                detail: reportURL.path,
+                outcome: "saved report"
+            )
         } catch {
             transcript += "\nReport generation failed: \(error.localizedDescription)"
+            logActivity(
+                kind: "report",
+                title: "Report generation failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
         }
     }
 
@@ -420,9 +605,62 @@ final class AuditModel: ObservableObject {
             transcript += output
             shareStatus = "Email draft ready"
             NSWorkspace.shared.open(emailDraftURL)
+            logActivity(
+                kind: "export",
+                title: "Generated boss email draft",
+                detail: emailDraftURL.path,
+                outcome: "saved export"
+            )
         } catch {
             shareStatus = "Email draft failed"
             transcript += "\nEmail draft failed: \(error.localizedDescription)"
+            logActivity(
+                kind: "export",
+                title: "Email draft failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
+        }
+        shareIsRunning = false
+    }
+
+    func exportCSVs() async {
+        guard hasBusinessDatabase else {
+            shareStatus = "Run an audit first."
+            logActivity(
+                kind: "export",
+                title: "CSV export blocked",
+                detail: "No connected database exists yet.",
+                outcome: "failed"
+            )
+            return
+        }
+        shareIsRunning = true
+        shareStatus = "Preparing CSV exports..."
+        do {
+            let output = try await runPython([
+                "-m", "invoice_audit", "export",
+                "--db", dbURL.path,
+                "--out", exportsURL.path
+            ])
+            transcript += output
+            shareStatus = "CSV exports ready"
+            NSWorkspace.shared.activateFileViewerSelecting([exportsURL])
+            logActivity(
+                kind: "export",
+                title: "Exported CSV data",
+                detail: output.trimmingCharacters(in: .whitespacesAndNewlines),
+                outcome: "saved export"
+            )
+        } catch {
+            shareStatus = "CSV export failed"
+            transcript += "\nCSV export failed: \(error.localizedDescription)"
+            logActivity(
+                kind: "export",
+                title: "CSV export failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
         }
         shareIsRunning = false
     }
@@ -430,6 +668,12 @@ final class AuditModel: ObservableObject {
     func exportIntegrationPayload() async {
         guard hasBusinessDatabase else {
             shareStatus = "Run an audit first."
+            logActivity(
+                kind: "export",
+                title: "API payload blocked",
+                detail: "No connected database exists yet.",
+                outcome: "failed"
+            )
             return
         }
         shareIsRunning = true
@@ -443,9 +687,21 @@ final class AuditModel: ObservableObject {
             transcript += output
             shareStatus = "API payload ready"
             NSWorkspace.shared.activateFileViewerSelecting([integrationPayloadURL])
+            logActivity(
+                kind: "export",
+                title: "Generated API/Zapier payload",
+                detail: integrationPayloadURL.path,
+                outcome: "saved export"
+            )
         } catch {
             shareStatus = "API payload failed"
             transcript += "\nAPI payload failed: \(error.localizedDescription)"
+            logActivity(
+                kind: "export",
+                title: "API payload failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
         }
         shareIsRunning = false
     }
@@ -453,11 +709,23 @@ final class AuditModel: ObservableObject {
     func sendWebhook() async {
         guard hasBusinessDatabase else {
             shareStatus = "Run an audit first."
+            logActivity(
+                kind: "webhook",
+                title: "Webhook blocked",
+                detail: "No connected database exists yet.",
+                outcome: "failed"
+            )
             return
         }
         let url = webhookURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !url.isEmpty else {
             shareStatus = "Paste a webhook URL first."
+            logActivity(
+                kind: "webhook",
+                title: "Webhook blocked",
+                detail: "No webhook URL was supplied.",
+                outcome: "failed"
+            )
             return
         }
         shareIsRunning = true
@@ -472,9 +740,21 @@ final class AuditModel: ObservableObject {
             shareStatus = output.localizedCaseInsensitiveContains("\"ok\": true")
                 ? "Webhook sent"
                 : "Webhook returned a non-success response"
+            logActivity(
+                kind: "webhook",
+                title: shareStatus,
+                detail: output.trimmingCharacters(in: .whitespacesAndNewlines),
+                outcome: output.localizedCaseInsensitiveContains("\"ok\": true") ? "sent" : "needs review"
+            )
         } catch {
             shareStatus = "Webhook send failed"
             transcript += "\nWebhook send failed: \(error.localizedDescription)"
+            logActivity(
+                kind: "webhook",
+                title: "Webhook send failed",
+                detail: error.localizedDescription,
+                outcome: "failed"
+            )
         }
         shareIsRunning = false
     }
@@ -506,10 +786,22 @@ final class AuditModel: ObservableObject {
         guard !question.isEmpty else { return }
         guard FileManager.default.fileExists(atPath: dbURL.path) else {
             analystAnswer = "No business database yet. Choose sources and run an audit first."
+            logActivity(
+                kind: "query",
+                title: "Query blocked",
+                detail: question,
+                outcome: "no connected database"
+            )
             return
         }
         analystIsRunning = true
         analystAnswer = "Thinking from the SQL evidence store..."
+        logActivity(
+            kind: "query",
+            title: "Asked business analyst",
+            detail: question,
+            outcome: "started"
+        )
         do {
             let output = try await runPython([
                 "-m", "invoice_audit", "ask",
@@ -517,10 +809,105 @@ final class AuditModel: ObservableObject {
                 question
             ])
             analystAnswer = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            logQuery(question: question, answer: analystAnswer, outcome: "answered")
+            logActivity(
+                kind: "query",
+                title: "Answered business query",
+                detail: question,
+                outcome: "learned from SQL evidence"
+            )
         } catch {
             analystAnswer = error.localizedDescription
+            logQuery(question: question, answer: analystAnswer, outcome: "failed")
+            logActivity(
+                kind: "query",
+                title: "Business query failed",
+                detail: "\(question) — \(error.localizedDescription)",
+                outcome: "failed"
+            )
         }
         analystIsRunning = false
+    }
+
+    func revealActivityJournal() {
+        NSWorkspace.shared.activateFileViewerSelecting([activityJournalURL])
+    }
+
+    func revealQueryHistory() {
+        NSWorkspace.shared.activateFileViewerSelecting([queryHistoryURL])
+    }
+
+    private func loadAppJournal() {
+        activityJournal = loadJSONLines(ActivityEvent.self, from: activityJournalURL, limit: 300)
+        queryHistory = loadJSONLines(QueryHistoryItem.self, from: queryHistoryURL, limit: 120)
+    }
+
+    private func logActivity(kind: String, title: String, detail: String, outcome: String) {
+        let event = ActivityEvent(
+            timestamp: appTimestamp(),
+            kind: kind,
+            title: title,
+            detail: detail,
+            outcome: outcome
+        )
+        activityJournal.insert(event, at: 0)
+        if activityJournal.count > 300 {
+            activityJournal.removeLast(activityJournal.count - 300)
+        }
+        appendJSONLine(event, to: activityJournalURL)
+    }
+
+    private func logQuery(question: String, answer: String, outcome: String) {
+        let item = QueryHistoryItem(
+            timestamp: appTimestamp(),
+            question: question,
+            answer: answer,
+            outcome: outcome
+        )
+        queryHistory.insert(item, at: 0)
+        if queryHistory.count > 120 {
+            queryHistory.removeLast(queryHistory.count - 120)
+        }
+        appendJSONLine(item, to: queryHistoryURL)
+    }
+
+    private func loadJSONLines<T: Decodable>(_ type: T.Type, from url: URL, limit: Int) -> [T] {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        let decoded = text
+            .split(separator: "\n")
+            .suffix(limit)
+            .compactMap { line -> T? in
+                guard let data = String(line).data(using: .utf8) else { return nil }
+                return try? decoder.decode(T.self, from: data)
+            }
+        return Array(decoded.reversed())
+    }
+
+    private func appendJSONLine<T: Encodable>(_ value: T, to url: URL) {
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            var data = try encoder.encode(value)
+            data.append(0x0A)
+            if FileManager.default.fileExists(atPath: url.path) {
+                let handle = try FileHandle(forWritingTo: url)
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+                try handle.close()
+            } else {
+                try data.write(to: url, options: .atomic)
+            }
+        } catch {
+            transcript += "\nJournal write failed: \(error.localizedDescription)"
+        }
     }
 
     private func loadReceipt(from url: URL) async {
@@ -841,6 +1228,53 @@ struct ExposureRow: Identifiable {
     }
 }
 
+struct ActivityEvent: Identifiable, Codable {
+    let id: String
+    let timestamp: String
+    let kind: String
+    let title: String
+    let detail: String
+    let outcome: String
+
+    init(
+        id: String = UUID().uuidString,
+        timestamp: String,
+        kind: String,
+        title: String,
+        detail: String,
+        outcome: String
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+        self.outcome = outcome
+    }
+}
+
+struct QueryHistoryItem: Identifiable, Codable {
+    let id: String
+    let timestamp: String
+    let question: String
+    let answer: String
+    let outcome: String
+
+    init(
+        id: String = UUID().uuidString,
+        timestamp: String,
+        question: String,
+        answer: String,
+        outcome: String
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.question = question
+        self.answer = answer
+        self.outcome = outcome
+    }
+}
+
 struct InvoiceView: Identifiable {
     let id: String
     let file: String
@@ -967,6 +1401,7 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
     case sources = "Sources"
     case audit = "Audit"
     case review = "Review"
+    case saveExport = "Save / Export"
     case query = "Query"
 
     var id: String { rawValue }
@@ -977,7 +1412,8 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
         case .sources: 1
         case .audit: 2
         case .review: 3
-        case .query: 4
+        case .saveExport: 4
+        case .query: 5
         }
     }
 
@@ -987,6 +1423,7 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
         case .sources: "connect data"
         case .audit: "run checks"
         case .review: "inspect risk"
+        case .saveExport: "save data"
         case .query: "ask analyst"
         }
     }
@@ -997,6 +1434,7 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
         case .sources: "folder.badge.gearshape"
         case .audit: "play.circle.fill"
         case .review: "checklist.checked"
+        case .saveExport: "square.and.arrow.up"
         case .query: "bubble.left.and.text.bubble.right"
         }
     }
@@ -1058,6 +1496,8 @@ struct DashboardView: View {
                                 }
                             case .review:
                                 ReviewStepView()
+                            case .saveExport:
+                                SaveExportStepView()
                             case .query:
                                 QueryStepView()
                             }
@@ -1580,70 +2020,117 @@ struct SourcesStepView: View {
     let continueAction: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            WizardTitle(
-                eyebrow: "Step 1",
-                title: "Point the system at the data",
-                subtitle: "Keep this simple: receipts/invoices, Excel price sheets, and the connected SQL evidence database. Advanced API connectors and sharing live in Settings."
-            )
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                WizardTitle(
+                    eyebrow: "Step 1",
+                    title: "Point the system at the data",
+                    subtitle: "Keep this simple: receipts/invoices, Excel price sheets, connected SQL evidence, and legacy VM/RM handoffs when the source system cannot export cleanly."
+                )
 
-            HStack(spacing: 14) {
-                WizardSourceCard(
-                    number: "1",
-                    title: "Invoices / receipts",
-                    detail: model.invoiceFolderURL?.path(percentEncoded: false) ?? "Choose a folder of PDFs, scans, or receipt images.",
-                    systemImage: "folder",
-                    isReady: model.invoiceFolderURL != nil,
-                    actionTitle: "Choose Folder",
-                    action: model.chooseInvoiceFolder
-                )
-                WizardSourceCard(
-                    number: "2",
-                    title: "Excel sheets / price data",
-                    detail: model.pricebookURL?.lastPathComponent ?? "Choose .xlsx, .csv, or SQLite customer price data.",
-                    systemImage: "tablecells",
-                    isReady: model.pricebookURL != nil,
-                    actionTitle: "Choose Sheet",
-                    action: model.choosePricebook
-                )
-                WizardSourceCard(
-                    number: "3",
-                    title: "Connected database",
-                    detail: model.hasBusinessDatabase ? "SQLite evidence store exists and is queryable." : "No connected database yet. Run an audit after choosing data.",
-                    systemImage: "cylinder.split.1x2",
-                    isReady: model.hasBusinessDatabase,
-                    actionTitle: model.hasBusinessDatabase ? "Open Database" : "Create Database",
-                    action: {
-                        if model.hasBusinessDatabase {
-                            model.revealDatabase()
-                        } else if model.canRunAudit {
-                            Task { await model.runAudit() }
-                        } else {
-                            model.status = "Choose invoices and Excel sheets first"
+                HStack(spacing: 14) {
+                    WizardSourceCard(
+                        number: "1",
+                        title: "Invoices / receipts",
+                        detail: model.invoiceFolderURL?.path(percentEncoded: false) ?? "Choose a folder of PDFs, scans, or receipt images.",
+                        systemImage: "folder",
+                        isReady: model.invoiceFolderURL != nil,
+                        actionTitle: "Choose Folder",
+                        action: model.chooseInvoiceFolder
+                    )
+                    WizardSourceCard(
+                        number: "2",
+                        title: "Excel sheets / price data",
+                        detail: model.pricebookURL?.lastPathComponent ?? "Choose .xlsx, .csv, or SQLite customer price data.",
+                        systemImage: "tablecells",
+                        isReady: model.pricebookURL != nil,
+                        actionTitle: "Choose Sheet",
+                        action: model.choosePricebook
+                    )
+                    WizardSourceCard(
+                        number: "3",
+                        title: "Connected database",
+                        detail: model.hasBusinessDatabase ? "SQLite evidence store exists and is queryable." : "No connected database yet. Run an audit after choosing data.",
+                        systemImage: "cylinder.split.1x2",
+                        isReady: model.hasBusinessDatabase,
+                        actionTitle: model.hasBusinessDatabase ? "Open Database" : "Create Database",
+                        action: {
+                            if model.hasBusinessDatabase {
+                                model.revealDatabase()
+                            } else if model.canRunAudit {
+                                Task { await model.runAudit() }
+                            } else {
+                                model.status = "Choose invoices and Excel sheets first"
+                            }
                         }
-                    }
-                )
-            }
+                    )
+                }
 
-            HStack {
-                Text("Advanced source connectors, market benchmarks, rules, and share/export are under the gear.")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AppTheme.muted)
-                Spacer()
-                Button {
-                    model.useSampleData()
-                } label: {
-                    Label("Use Sample", systemImage: "shippingbox")
+                LegacyBridgePanel()
+
+                HStack {
+                    Text("Market benchmarks, rules, API connectors, and share/export still live under the gear for advanced setup.")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AppTheme.muted)
+                    Spacer()
+                    Button {
+                        model.useSampleData()
+                    } label: {
+                        Label("Use Sample", systemImage: "shippingbox")
+                    }
+                    Button {
+                        continueAction()
+                    } label: {
+                        Label("Continue", systemImage: "arrow.right")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canRunAudit)
                 }
-                Button {
-                    continueAction()
-                } label: {
-                    Label("Continue", systemImage: "arrow.right")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.canRunAudit)
+                Spacer(minLength: 12)
             }
-            Spacer()
+        }
+    }
+}
+
+struct LegacyBridgePanel: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        DarkPanel {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Legacy VM / RM bridge", systemImage: "display.and.arrow.down")
+                        .font(.system(size: 16, weight: .bold))
+                    Text("For old payroll, RM, ERP, or plant computers that cannot export cleanly: open Kist Work Agent, log into the legacy system, extract screens/files/database exports, then bring the extracted PDFs, CSV, Excel, or API JSON back into this audit.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(AppTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(model.legacyBridgeStatus)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(model.legacyBridgeStatus.localizedCaseInsensitiveContains("reachable") ? AppTheme.green : AppTheme.orange)
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    Button {
+                        Task { await model.checkLegacyBridge() }
+                    } label: {
+                        Label("Check Bridge", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                    Button {
+                        model.openLegacyBridge()
+                    } label: {
+                        Label("Open Kist Agent", systemImage: "safari")
+                    }
+                    Button {
+                        model.copyLegacyBridgeInstructions()
+                    } label: {
+                        Label("Copy Handoff", systemImage: "doc.on.clipboard")
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
         }
     }
 }
@@ -1782,20 +2269,276 @@ struct ReviewStepView: View {
     }
 }
 
+struct SaveExportStepView: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                WizardTitle(
+                    eyebrow: "Step 4",
+                    title: "Save, export, and send the data",
+                    subtitle: "Create the outputs leadership and downstream systems need: report, CSVs, email draft, API/Zapier payload, webhook send, and full app/query journals."
+                )
+
+                HStack(spacing: 14) {
+                    ExportActionCard(
+                        title: "Visual report",
+                        detail: model.hasReport ? "HTML business map is ready." : "Generate after the connected database exists.",
+                        systemImage: "chart.bar.xaxis",
+                        isReady: model.hasReport,
+                        actionTitle: "Open Report",
+                        action: model.revealReport
+                    )
+                    ExportActionCard(
+                        title: "CSV data",
+                        detail: "Exports categories, vendors, findings, line items, and top findings for finance/ops.",
+                        systemImage: "tablecells",
+                        isReady: model.hasBusinessDatabase,
+                        actionTitle: "Export CSVs",
+                        action: { Task { await model.exportCSVs() } }
+                    )
+                    ExportActionCard(
+                        title: "Journal files",
+                        detail: "App activity and analyst query history are saved locally as JSONL.",
+                        systemImage: "book.closed",
+                        isReady: !model.activityJournal.isEmpty || !model.queryHistory.isEmpty,
+                        actionTitle: "Reveal Journal",
+                        action: model.revealActivityJournal
+                    )
+                }
+
+                HStack(alignment: .top, spacing: 16) {
+                    DarkPanel {
+                        VStack(alignment: .leading, spacing: 12) {
+                            SectionHeader(title: "Boss-ready outputs", systemImage: "square.and.arrow.up")
+                            SharePanel()
+                        }
+                    }
+
+                    DarkPanel {
+                        VStack(alignment: .leading, spacing: 12) {
+                            SectionHeader(title: "What will be sent", systemImage: "checkmark.shield")
+                            ExportFact("Report", "Standalone HTML visual map from SQLite evidence.")
+                            ExportFact("CSV", "Finance/ops tables for spreadsheet review.")
+                            ExportFact("Email", "Executive summary draft with optional report attachment.")
+                            ExportFact("API/Zapier", "Generic JSON payload; webhook only sends when a URL is supplied.")
+                            ExportFact("Journal", "Local JSONL record of app work, queries, outcomes, and failures.")
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+    }
+}
+
+struct ExportActionCard: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let isReady: Bool
+    let actionTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: systemImage)
+                    .foregroundStyle(isReady ? AppTheme.green : AppTheme.orange)
+                Spacer()
+                Image(systemName: isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .foregroundStyle(isReady ? AppTheme.green : AppTheme.orange)
+            }
+            Text(title)
+                .font(.system(size: 17, weight: .bold))
+            Text(detail)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(actionTitle, action: action)
+                .buttonStyle(.bordered)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 170, alignment: .leading)
+        .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(isReady ? AppTheme.green.opacity(0.45) : AppTheme.stroke, lineWidth: 1))
+    }
+}
+
+struct ExportFact: View {
+    let title: String
+    let detail: String
+
+    init(_ title: String, _ detail: String) {
+        self.title = title
+        self.detail = detail
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+            Text(detail)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppTheme.panel2.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 struct QueryStepView: View {
     @EnvironmentObject private var model: AuditModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            WizardTitle(
-                eyebrow: "Query mode",
-                title: "Ask the business analyst",
-                subtitle: "Ask plain-English questions after the audit. Answers cite SQL evidence, categories, vendors, findings, and reports."
-            )
-            AnalystPanel()
-                .frame(maxWidth: 820, minHeight: 360)
-            Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                WizardTitle(
+                    eyebrow: "Query mode",
+                    title: "Ask the business analyst and review the work journal",
+                    subtitle: "Every analyst question and system action is saved with time, outcome, what was learned, and what failed. This is the LIST-style memory layer for the demo."
+                )
+
+                HStack(alignment: .top, spacing: 16) {
+                    AnalystPanel()
+                        .frame(minWidth: 420, maxWidth: 560, minHeight: 420)
+                    QueryHistoryPanel()
+                        .frame(maxWidth: .infinity, minHeight: 420)
+                }
+
+                ActivityJournalPanel()
+            }
+            .padding(.bottom, 24)
         }
+    }
+}
+
+struct QueryHistoryPanel: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        DarkPanel {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    SectionHeader(title: "Past searches", systemImage: "magnifyingglass.circle")
+                    Button("Reveal") {
+                        model.revealQueryHistory()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                if model.queryHistory.isEmpty {
+                    EmptyDarkText("No saved analyst searches yet.")
+                } else {
+                    ForEach(model.queryHistory.prefix(10)) { item in
+                        QueryHistoryRow(item: item)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct QueryHistoryRow: View {
+    let item: QueryHistoryItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(item.timestamp)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(AppTheme.muted)
+                Spacer()
+                Text(item.outcome.uppercased())
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(item.outcome == "answered" ? AppTheme.green : AppTheme.orange)
+            }
+            Text(item.question)
+                .font(.system(size: 13, weight: .bold))
+            Text(item.answer)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.76))
+                .lineLimit(5)
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppTheme.panel2.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct ActivityJournalPanel: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        DarkPanel {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    SectionHeader(title: "Daily work journal", systemImage: "book.pages")
+                    Button("Reveal JSONL") {
+                        model.revealActivityJournal()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                if model.activityJournal.isEmpty {
+                    EmptyDarkText("No app activity logged yet.")
+                } else {
+                    ForEach(model.activityJournal.prefix(30)) { event in
+                        ActivityEventRow(event: event)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ActivityEventRow: View {
+    let event: ActivityEvent
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            VStack(spacing: 4) {
+                Circle()
+                    .fill(outcomeColor)
+                    .frame(width: 9, height: 9)
+                Rectangle()
+                    .fill(AppTheme.stroke)
+                    .frame(width: 1, height: 42)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(event.title)
+                        .font(.system(size: 13, weight: .bold))
+                    Spacer()
+                    Text(event.timestamp)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Text(event.detail)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.74))
+                    .lineLimit(3)
+                HStack {
+                    Text(event.kind.uppercased())
+                    Text("·")
+                    Text(event.outcome)
+                }
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(outcomeColor)
+            }
+        }
+        .padding(10)
+        .background(AppTheme.panel2.opacity(0.58), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private var outcomeColor: Color {
+        event.outcome.localizedCaseInsensitiveContains("fail") ? AppTheme.red :
+            (event.outcome.localizedCaseInsensitiveContains("started") ? AppTheme.orange : AppTheme.green)
     }
 }
 
@@ -2649,6 +3392,13 @@ struct SharePanel: View {
                 .disabled(!model.canShare)
 
                 Button {
+                    Task { await model.exportCSVs() }
+                } label: {
+                    Label("CSV Export", systemImage: "tablecells")
+                }
+                .disabled(!model.canShare)
+
+                Button {
                     Task { await model.exportIntegrationPayload() }
                 } label: {
                     Label("API File", systemImage: "doc.badge.gearshape")
@@ -2672,7 +3422,8 @@ struct SharePanel: View {
                 .lineLimit(2)
         }
         .padding(14)
-        .background(.white.opacity(0.54), in: RoundedRectangle(cornerRadius: 8))
+        .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.stroke, lineWidth: 1))
     }
 }
 
@@ -2811,6 +3562,12 @@ func number(_ value: Double) -> String {
         return String(Int(value))
     }
     return String(format: "%.2f", value)
+}
+
+func appTimestamp() -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: Date())
 }
 
 func jsonDouble(_ dict: [String: Any], _ key: String) -> Double {

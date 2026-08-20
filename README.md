@@ -152,15 +152,27 @@ The SwiftUI app opens into a dark, step-based workspace:
 0. **Pulse** — the first-page SOS dashboard: money at risk, data rot, review
    priorities, recent audit history, category/vendor exposure, and next actions.
 1. **Sources** — choose invoice/PDF folder, Excel/CSV price sheets, and confirm
-   the connected SQLite evidence database.
+   the connected SQLite evidence database. The Sources screen also exposes the
+   local **Legacy VM/RM bridge** handoff for old payroll, RM, ERP, or plant
+   computers: open Kist Work Agent at `http://127.0.0.1:8765`, extract legacy
+   screens/files/database exports there, then import the resulting PDFs, CSV,
+   Excel, or API JSON here.
 2. **Audit** — run OCR/extraction/price checks and create the receipt/report.
 3. **Review** — inspect scan, OCR read, digital line items, and findings.
-4. **Query** — ask the SQL-backed business analyst follow-up questions. The
-   advisor is also available as a slideout from the top bar.
+4. **Save / Export** — save reports, CSVs, boss-ready email drafts,
+   API/Zapier payloads, webhook sends, and the local app/query journals.
+5. **Query** — ask the SQL-backed business analyst follow-up questions and see
+   persisted past searches plus the full daily activity journal: what ran,
+   what was achieved, what was learned, and what failed. The advisor is also
+   available as a slideout from the top bar.
 
 Advanced source connectors, market benchmarks, rules, share/export, webhook
 send, and raw artifacts live under the gear icon so the main path stays
 nontechnical.
+
+The app writes operator/system memory under `.invoice-audit-app/`:
+`activity-journal.jsonl` for the work journal and `query-history.jsonl` for
+analyst searches. These are local, inspectable JSONL files, not hidden UI state.
 
 On Windows 11, use the native launcher:
 
