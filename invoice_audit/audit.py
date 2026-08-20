@@ -13,28 +13,18 @@ from pathlib import Path
 
 from .floor import Floor
 from .grounding import ground_line, stated_total_reconciles
+from .ingest import collect_scan_inputs
 from .layout import parse_invoice
 from .ocr import AuditError, backend_label, ocr_image, sha256_file
 from .pricebook import PriceBook
 from .receipt import SCHEMA, sign_receipt
 from .validate import arithmetic_flags
-
-SCAN_EXTS = {".png", ".jpg", ".jpeg", ".tiff", ".pdf"}
-
+from .categories import classify_invoice, classify_item
 
 def audit_folder(scans_dir: Path, pricebook_path: Path,
                  tolerance: float = 0.15,
                  floor_path: Path | None = None) -> dict:
-    if not scans_dir.is_dir():
-        raise AuditError(f"scans-dir-missing:{scans_dir}")
-    scans = sorted(p for p in scans_dir.iterdir()
-                   if p.suffix.lower() in SCAN_EXTS)
-    if not scans:
-        raise AuditError(f"no-scans-found:{scans_dir}")
-    for p in scans:
-        if p.suffix.lower() == ".pdf":
-            raise AuditError("pdf-not-wired:render PDFs to PNG first "
-                             "(roadmap — labelled, not silently skipped)")
+    scans = collect_scan_inputs(scans_dir)
 
     book = PriceBook.load(pricebook_path)
     floor = Floor.load(floor_path) if floor_path is not None else None
@@ -44,7 +34,7 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
     potential_overcharge = 0.0
     policy_overage = 0.0
     for scan in scans:
-        tokens = ocr_image(scan)
+        tokens = ocr_image(scan.image_path)
         parsed = parse_invoice(tokens)
         flags = arithmetic_flags(parsed)
         reconciles = stated_total_reconciles(parsed)
@@ -60,12 +50,18 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
             # Symbolic floor: is this (trusted) number within taught policy?
             floor_check = floor.check_line(line) if floor else {
                 "verdict": "unknown", "veto": False, "conflicts": []}
+            category = classify_item(line.sku, line.description, parsed.vendor)
+            policy_delta_total = _policy_delta_total(line, floor_check)
 
             lines.append({
                 "sku": line.sku, "description": line.description,
                 "qty": line.qty, "unit_price": line.unit_price,
                 "line_total": line.line_total,
+                "ocr_row_text": line.row_text,
                 "ocr_min_confidence": round(line.min_confidence, 3),
+                "category": category["category"],
+                "categoryEvidence": category,
+                "policy_delta_total": policy_delta_total,
                 "grounding": grounding,
                 "floor": floor_check,
                 **check,
@@ -92,20 +88,28 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
                                             f"[{c['relation_type']} "
                                             f"src={c['source']}]"})
                     if c["relation_type"] == "max_unit_price":
-                        policy_overage += round(
-                            (line.unit_price - float(c["object"])) * line.qty, 2)
+                        policy_overage += policy_delta_total
 
+        invoice_category = classify_invoice(parsed.vendor, lines)
         invoice = {
-            "file": scan.name, "path": str(scan), "sha256": sha256_file(scan),
+            "file": scan.file_name,
+            "path": str(scan.image_path),
+            "sha256": scan.image_sha256,
+            "source_path": str(scan.source_path),
+            "source_sha256": scan.source_sha256,
+            "source_kind": scan.source_kind,
+            "source_page": scan.source_page,
             "vendor": parsed.vendor, "invoice_no": parsed.invoice_no,
             "date": parsed.date, "stated_total": parsed.stated_total,
+            "category": invoice_category["category"],
+            "categoryEvidence": invoice_category,
             "statedTotalReconciles": reconciles,
             "lines": lines, "flags": flags,
             "disposition": "flagged" if flags else "clean",
         }
         invoices.append(invoice)
         for f in flags:
-            review_queue.append({"invoice": scan.name, **f})
+            review_queue.append({"invoice": scan.file_name, **f})
 
     body = {
         "schema": SCHEMA,
@@ -115,8 +119,18 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
                    "extraction": "deterministic-layout-v1",
                    "grounding": "trace+over-determination-v1",
                    "floor": "invoice-audit.floor.v1"},
-        "scans": [{"path": inv["path"], "file": inv["file"],
-                   "sha256": inv["sha256"]} for inv in invoices],
+        "scans": [
+            {
+                "path": inv["path"],
+                "file": inv["file"],
+                "sha256": inv["sha256"],
+                "source_path": inv["source_path"],
+                "source_sha256": inv["source_sha256"],
+                "source_kind": inv["source_kind"],
+                "source_page": inv["source_page"],
+            }
+            for inv in invoices
+        ],
         "pricebook": {"path": str(pricebook_path),
                       "sha256": book.source_sha256,
                       "rows": len(book.rows)},
@@ -137,3 +151,16 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
                               "sha256": sha256_file(floor_path),
                               "rules": len(floor.rules)}
     return sign_receipt(body)
+
+
+def _policy_delta_total(line, floor_check: dict) -> float:
+    total = 0.0
+    for conflict in floor_check.get("conflicts", []) or []:
+        if conflict.get("relation_type") != "max_unit_price":
+            continue
+        try:
+            max_unit = float(conflict["object"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        total += max(0.0, (float(line.unit_price) - max_unit) * float(line.qty))
+    return round(total, 2)

@@ -75,7 +75,15 @@ if (-not $Python -or -not $Tesseract) {
 }
 $env:Path = (Split-Path -Parent $Tesseract) + ";" + $env:Path
 
-$Receipt = Join-Path $Root "demo\scans\audit-receipt-windows.json"
+$AppState = Join-Path $Root ".invoice-audit-app"
+New-Item -ItemType Directory -Force -Path $AppState | Out-Null
+$Receipt = Join-Path $AppState "latest-receipt-windows.json"
+$Database = Join-Path $AppState "business-windows.sqlite"
+$Report = Join-Path $AppState "business-report-windows.html"
+$InvoiceFolder = $null
+$Pricebook = $null
+$Rules = $null
+$ScanPaths = @{}
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
@@ -126,6 +134,14 @@ $runButton.Anchor = "Top,Right"
 $runButton.Location = New-Object System.Drawing.Point(1008, 24)
 $header.Controls.Add($runButton)
 
+$reportButton = New-Object System.Windows.Forms.Button
+$reportButton.Text = "Report"
+$reportButton.Width = 94
+$reportButton.Height = 36
+$reportButton.Anchor = "Top,Right"
+$reportButton.Location = New-Object System.Drawing.Point(906, 24)
+$header.Controls.Add($reportButton)
+
 $verifyButton = New-Object System.Windows.Forms.Button
 $verifyButton.Text = "Verify"
 $verifyButton.Width = 94
@@ -133,6 +149,56 @@ $verifyButton.Height = 36
 $verifyButton.Anchor = "Top,Right"
 $verifyButton.Location = New-Object System.Drawing.Point(1136, 24)
 $header.Controls.Add($verifyButton)
+
+$sourcePanel = New-Object System.Windows.Forms.Panel
+$sourcePanel.Dock = "Top"
+$sourcePanel.Height = 108
+$sourcePanel.Padding = New-Object System.Windows.Forms.Padding(22, 4, 22, 12)
+$sourcePanel.BackColor = $paper
+$form.Controls.Add($sourcePanel)
+
+$sourceTitle = New-Object System.Windows.Forms.Label
+$sourceTitle.Text = "Data Sources"
+$sourceTitle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 12)
+$sourceTitle.ForeColor = $ink
+$sourceTitle.AutoSize = $true
+$sourceTitle.Location = New-Object System.Drawing.Point(22, 4)
+$sourcePanel.Controls.Add($sourceTitle)
+
+$sourceStatus = New-Object System.Windows.Forms.Label
+$sourceStatus.Text = "Choose an invoice folder and customer price history before running an audit."
+$sourceStatus.ForeColor = $muted
+$sourceStatus.AutoSize = $true
+$sourceStatus.Location = New-Object System.Drawing.Point(22, 28)
+$sourcePanel.Controls.Add($sourceStatus)
+
+$chooseInvoicesButton = New-Object System.Windows.Forms.Button
+$chooseInvoicesButton.Text = "Choose Invoices"
+$chooseInvoicesButton.Width = 138
+$chooseInvoicesButton.Height = 32
+$chooseInvoicesButton.Location = New-Object System.Drawing.Point(22, 60)
+$sourcePanel.Controls.Add($chooseInvoicesButton)
+
+$choosePricebookButton = New-Object System.Windows.Forms.Button
+$choosePricebookButton.Text = "Choose Price History"
+$choosePricebookButton.Width = 166
+$choosePricebookButton.Height = 32
+$choosePricebookButton.Location = New-Object System.Drawing.Point(170, 60)
+$sourcePanel.Controls.Add($choosePricebookButton)
+
+$chooseRulesButton = New-Object System.Windows.Forms.Button
+$chooseRulesButton.Text = "Choose Rules"
+$chooseRulesButton.Width = 120
+$chooseRulesButton.Height = 32
+$chooseRulesButton.Location = New-Object System.Drawing.Point(346, 60)
+$sourcePanel.Controls.Add($chooseRulesButton)
+
+$sampleButton = New-Object System.Windows.Forms.Button
+$sampleButton.Text = "Use Sample Data"
+$sampleButton.Width = 138
+$sampleButton.Height = 32
+$sampleButton.Location = New-Object System.Drawing.Point(476, 60)
+$sourcePanel.Controls.Add($sampleButton)
 
 $body = New-Object System.Windows.Forms.TableLayoutPanel
 $body.Dock = "Fill"
@@ -194,9 +260,35 @@ $findingsList.Columns.Add("Line", 68) | Out-Null
 $findingsList.Columns.Add("Detail", 320) | Out-Null
 $right.Controls.Add($findingsList)
 
+function Update-SourceStatus {
+    $inv = if ($InvoiceFolder) { Split-Path -Leaf $InvoiceFolder } else { "no invoice folder" }
+    $pb = if ($Pricebook) { Split-Path -Leaf $Pricebook } else { "no price history" }
+    $rulesText = if ($Rules) { Split-Path -Leaf $Rules } else { "no rules" }
+    $sourceStatus.Text = "Invoices: $inv    Price history: $pb    Rules: $rulesText"
+    $runButton.Enabled = [bool]($InvoiceFolder -and $Pricebook)
+    $reportButton.Enabled = Test-Path $Report
+}
+
+function Generate-Report {
+    if (-not (Test-Path $Database)) { return }
+    Run-ProcessText $Python @(
+        "-m", "invoice_audit", "report",
+        "--db", $Database,
+        "--out", $Report
+    ) | Out-Null
+    $reportButton.Enabled = Test-Path $Report
+}
+
 function Load-Receipt {
     if (-not (Test-Path $Receipt)) { return }
     $r = Get-Content $Receipt -Raw | ConvertFrom-Json
+    $script:ScanPaths = @{}
+    foreach ($scan in $r.scans) {
+        $script:ScanPaths[$scan.file] = $scan.path
+    }
+    if ($r.scans.Count -gt 0) { $script:InvoiceFolder = Split-Path -Parent $r.scans[0].path }
+    if ($r.pricebook.path) { $script:Pricebook = $r.pricebook.path }
+    if ($r.floorRules.path) { $script:Rules = $r.floorRules.path }
     $metrics.Text = ("{0:C0} Exposure`n{1:C0} Policy`n{2} Findings    {3} Lines" -f `
         $r.totals.potentialOverchargeUSD,
         $r.totals.policyOverageUSD,
@@ -217,10 +309,11 @@ function Load-Receipt {
     }
     if ($invoiceList.Items.Count -gt 0) { $invoiceList.SelectedIndex = 0 }
     $status.Text = "Loaded receipt. Signature: " + $r.signature.Substring(0, 16) + "..."
+    Update-SourceStatus
 }
 
 function Show-Invoice($Name) {
-    $path = Join-Path $Root ("demo\scans\" + $Name)
+    $path = $script:ScanPaths[$Name]
     if (Test-Path $path) {
         if ($preview.Image) { $preview.Image.Dispose() }
         $stream = [System.IO.File]::OpenRead($path)
@@ -239,22 +332,88 @@ $findingsList.Add_SelectedIndexChanged({
     }
 })
 
+$chooseInvoicesButton.Add_Click({
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = "Choose the folder containing invoice scans"
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $script:InvoiceFolder = $dialog.SelectedPath
+        Update-SourceStatus
+    }
+})
+
+$choosePricebookButton.Add_Click({
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "Choose customer price history"
+    $dialog.Filter = "Price history (*.csv;*.sqlite;*.sqlite3;*.db)|*.csv;*.sqlite;*.sqlite3;*.db|All files (*.*)|*.*"
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $script:Pricebook = $dialog.FileName
+        Update-SourceStatus
+    }
+})
+
+$chooseRulesButton.Add_Click({
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "Choose optional rules file"
+    $dialog.Filter = "Rules (*.json)|*.json|All files (*.*)|*.*"
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $script:Rules = $dialog.FileName
+        Update-SourceStatus
+    }
+})
+
+$sampleButton.Add_Click({
+    try {
+        Run-ProcessText $Python @("demo\make_fixtures.py") | Out-Null
+        $script:InvoiceFolder = Join-Path $Root "demo\scans"
+        $script:Pricebook = Join-Path $Root "demo\pricebook.csv"
+        $script:Rules = Join-Path $Root "demo\floor-rules.json"
+        $status.Text = "Sample data selected"
+        Update-SourceStatus
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Invoice Audit") | Out-Null
+    }
+})
+
 $runButton.Add_Click({
     try {
-        $status.Text = "Rendering fixtures..."
-        [System.Windows.Forms.Application]::DoEvents()
-        Run-ProcessText $Python @("demo\make_fixtures.py") | Out-Null
+        if (-not $InvoiceFolder -or -not $Pricebook) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Choose an invoice folder and price-history file first.",
+                "Invoice Audit"
+            ) | Out-Null
+            return
+        }
         $status.Text = "Auditing invoices..."
         [System.Windows.Forms.Application]::DoEvents()
-        Run-ProcessText $Python @(
-            "-m", "invoice_audit", "audit", "demo\scans",
-            "--pricebook", "demo\pricebook.csv",
-            "--floor", "demo\floor-rules.json",
+        $args = @(
+            "-m", "invoice_audit", "audit-db", $InvoiceFolder,
+            "--pricebook", $Pricebook,
+            "--db", $Database,
             "--out", $Receipt
-        ) | Out-Null
+        )
+        if ($Rules) { $args += @("--floor", $Rules) }
+        Run-ProcessText $Python $args | Out-Null
+        Generate-Report
         Load-Receipt
     } catch {
         $status.Text = "Audit failed"
+        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Invoice Audit") | Out-Null
+    }
+})
+
+$reportButton.Add_Click({
+    try {
+        if (-not (Test-Path $Report)) { Generate-Report }
+        if (Test-Path $Report) {
+            Start-Process $Report
+        } else {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Run an audit first to generate the report.",
+                "Invoice Audit"
+            ) | Out-Null
+        }
+    } catch {
+        $status.Text = "Report failed"
         [System.Windows.Forms.MessageBox]::Show($_.Exception.Message, "Invoice Audit") | Out-Null
     }
 })
@@ -270,4 +429,5 @@ $verifyButton.Add_Click({
 })
 
 Load-Receipt
+Update-SourceStatus
 [System.Windows.Forms.Application]::Run($form)

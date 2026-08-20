@@ -102,6 +102,14 @@ def verify_receipt(receipt: dict, rehash_inputs: bool = True) -> list[str]:
                 problems.append(f"scan-absent:{p.name}")
             elif sha256_file(p) != scan["sha256"]:
                 problems.append(f"scan-hash-changed:{p.name}")
+            source_path = scan.get("source_path")
+            source_sha256 = scan.get("source_sha256")
+            if source_path and source_sha256:
+                sp = Path(source_path)
+                if not sp.exists():
+                    problems.append(f"source-absent:{sp.name}")
+                elif sha256_file(sp) != source_sha256:
+                    problems.append(f"source-hash-changed:{sp.name}")
         pb = receipt.get("pricebook", {})
         if pb:
             p = Path(pb["path"])

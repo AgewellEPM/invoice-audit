@@ -21,6 +21,11 @@ scan ─▶ ocr.py ─▶ layout.py ─▶ validate.py ─▶ grounding.py ─�
                                                FAIL CLOSED)                │
                                                                           ▼
                                                         signed receipt .json (receipt.py, Ed25519)
+                                                                          │
+                                                                          ▼
+category map ─▶ SQLite store ─▶ analyst / CSV export / HTML report / Slack payload
+               (Jeeves/PREL-
+                style claims)
 ```
 
 - **Deterministic where it matters.** OCR is probabilistic; *everything after
@@ -50,6 +55,11 @@ scan ─▶ ocr.py ─▶ layout.py ─▶ validate.py ─▶ grounding.py ─�
   Nothing degrades quietly.
 - **Human gate is structural.** `audit.py` puts every flag in a review queue;
   it approves and rejects nothing.
+- **What happens after extraction:** `categories.py` maps every invoice and
+  every line item into an auditable category claim; `store.py` persists the
+  signed receipt into SQL; `analytics.py` turns that into category/vendor spend,
+  price exposure, policy exposure, CSVs, a visual report, and a Slack-ready
+  payload. SQL + claims are the source of truth; exports are derived views.
 
 ## Use
 
@@ -57,6 +67,17 @@ scan ─▶ ocr.py ─▶ layout.py ─▶ validate.py ─▶ grounding.py ─�
 scripts/build.sh                       # compile the on-device OCR binary (macOS)
 python3 -m invoice_audit audit <scans-dir> --pricebook <history.csv|.sqlite> \
                                           [--floor <rules.json>]
+python3 -m invoice_audit audit-db <scans-dir> --pricebook <history.csv|.sqlite> \
+                                             --db business.sqlite \
+                                             [--floor <rules.json>]
+python3 -m invoice_audit findings --db business.sqlite
+python3 -m invoice_audit ask --db business.sqlite "show overcharges"
+python3 -m invoice_audit analytics --db business.sqlite
+python3 -m invoice_audit export --db business.sqlite --out exports/
+python3 -m invoice_audit report --db business.sqlite --out business-report.html
+python3 -m invoice_audit slack-payload --db business.sqlite --out slack.json
+python3 -m invoice_audit watch <scans-dir> --pricebook <history.csv|.sqlite> \
+                                           --db business.sqlite [--once]
 python3 -m invoice_audit verify <receipt.json>   # re-check signature + input hashes
 ```
 
@@ -65,6 +86,24 @@ python3 -m invoice_audit verify <receipt.json>   # re-check signature + input ha
   Data-Exchange engine already exports.
 - **Taught rules (`--floor`):** JSON, schema `invoice-audit.floor.v1`; each rule
   carries `source` + `evidence` and is hashed into the receipt.
+- **PDFs:** accepted directly. Each page is rendered to a cached OCR image under
+  `.invoice-audit-rendered/`, while the receipt keeps the original PDF
+  path/hash/page for verification.
+- **SQLite backend:** `audit-db` writes the signed receipt into queryable tables
+  for source files, invoices, line items, findings, categories, policy exposure,
+  and PREL/Jeeves-style business claims. `ask` answers from those tables with
+  invoice/line citations.
+- **Business outputs:** `analytics` prints the category/vendor exposure map;
+  `export` writes CSVs for finance/ops; `report` writes a standalone visual HTML
+  report; `slack-payload` writes a safe JSON message but does not post anywhere
+  until a webhook is explicitly configured.
+- **Revenue/profit boundary:** this database currently proves AP invoice spend,
+  discrepancy exposure, vendors, categories, OCR evidence, and policy leaks. To
+  answer “where are we making the most money,” connect sales, work orders,
+  production output, GL revenue, or job-cost data next.
+- **Continuous worker:** `watch` fingerprints the invoice/PDF folder, pricebook,
+  and rules file; when inputs change it reruns the audit and updates the SQLite
+  backend. `--once` performs one check for schedulers/launch agents.
 
 ## Native Demo Apps
 
@@ -75,10 +114,12 @@ scripts/run_swift_app.sh
 scripts/build_swift_app.sh              # creates dist/Invoice Audit.app
 ```
 
-The SwiftUI app opens directly into the audit workspace: run the demo audit,
-inspect invoice images, review flagged findings, verify the receipt, and reveal
-the signed JSON artifact. It is intentionally thin; all results still come from
-the same Python engine and signed receipt path.
+The SwiftUI app opens directly into the audit workspace: choose invoice/PDF
+sources, choose a price-history CSV/SQLite file, run the audit, inspect the
+scan plus OCR-to-digital conversion, review flagged findings, verify the
+receipt, ask the SQL-backed business analyst follow-up questions, open the
+visual business report, and reveal both the signed JSON artifact and SQLite
+database.
 
 On Windows 11, use the native launcher:
 
@@ -111,10 +152,11 @@ survives `verify` and fails the instant a scan / pricebook / rules byte changes.
 
 ## Status — PILOT-READY
 
-Happy path proven end-to-end on real (rendered) scans; fail-closed on the error
-paths; **33/33 tests green** (each stage + the grounding ladder + every floor
-outcome pinned per-site); receipts sign / verify / tamper-detect over scans,
-pricebook, **and** the taught-rules file.
+Happy path proven end-to-end on real (rendered) scans and PDF-rendered pages;
+fail-closed on the error paths; **41/41 tests green** (each stage + the
+grounding ladder + every floor outcome pinned per-site); receipts sign / verify
+/ tamper-detect over scans, original PDFs, pricebook, **and** the taught-rules
+file.
 
 **Enterprise-blocked — named gaps (do not claim these work):**
 - **Residual hallucination:** a *high-confidence, self-consistent* OCR misread
@@ -122,9 +164,11 @@ pricebook, **and** the taught-rules file.
   independent read** (digit-for-digit agreement across two OCR engines) — the
   next brick, not this one. The macOS-Vision + Windows-Tesseract split below is
   the natural place to add it (two engines = the second read).
-- **PDF ingest** not wired — render to PNG first (`pdf-not-wired`).
 - **Deep-legacy price history** (trapped in an app with no export) uses the
   Perslis VM+OCR screen-read path — real but not wired into this engine yet.
+- **Connectors beyond local files** (ERP APIs, email inboxes, network shares,
+  app databases) are not wired yet. Current sources are local PDFs/images plus
+  CSV/SQLite price history.
 - **Layout coverage:** tuned for standard QTY/DESC/UNIT/TOTAL tables; odd vendor
   layouts and OCR-garbled headers/totals fail closed, they don't guess.
 - Not integrated with the kist approval loop / remote-session model yet.
@@ -141,7 +185,7 @@ does not). Both emit the same `{text,confidence,x,y,w,h}` token JSON, so layout
 `ocr.py` (backend selection) and `scripts/` for the Windows run path.
 
 Validated on Windows 11 ARM64 with Python 3.12.10 and Tesseract 5.4.0: the
-current fixture audit, signature verification, and all 33 tests pass. The
+current fixture audit, signature verification, and the same test suite pass. The
 Windows-signed receipt also verifies with `cryptography` on macOS.
 
 Signing keys: `~/.invoice-audit/signing.key` (0600, generated on first run).

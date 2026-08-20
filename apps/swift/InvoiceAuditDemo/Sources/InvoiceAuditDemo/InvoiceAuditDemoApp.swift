@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 @main
 struct InvoiceAuditDemoApp: App {
@@ -9,6 +10,7 @@ struct InvoiceAuditDemoApp: App {
         WindowGroup {
             DashboardView()
                 .environmentObject(model)
+                .preferredColorScheme(.light)
                 .frame(minWidth: 1180, minHeight: 760)
                 .task {
                     await model.loadExistingReceipt()
@@ -18,10 +20,14 @@ struct InvoiceAuditDemoApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appInfo) {
-                Button("Run Demo Audit") {
-                    Task { await model.runDemoAudit() }
+                Button("Run Audit") {
+                    Task { await model.runAudit() }
                 }
                 .keyboardShortcut("r", modifiers: [.command])
+
+                Button("Use Sample Data") {
+                    model.useSampleData()
+                }
 
                 Button("Verify Receipt") {
                     Task { await model.verifyReceipt() }
@@ -38,12 +44,20 @@ final class AuditModel: ObservableObject {
     @Published var selectedInvoiceID: String?
     @Published var selectedFindingID: String?
     @Published var isRunning = false
-    @Published var status = "Ready"
+    @Published var status = "Choose invoice and price-history sources"
     @Published var verification = "Not verified"
     @Published var transcript = ""
+    @Published var invoiceFolderURL: URL?
+    @Published var pricebookURL: URL?
+    @Published var rulesURL: URL?
+    @Published var analystQuestion = "show overcharges"
+    @Published var analystAnswer = "Run an audit, then ask about overcharges, policy exceptions, OCR evidence, missing history, or a specific invoice."
+    @Published var analystIsRunning = false
 
     private let repoRoot: URL
     private let receiptURL: URL
+    private let dbURL: URL
+    private let reportURL: URL
 
     init() {
         let envRoot = ProcessInfo.processInfo.environment["INVOICE_AUDIT_ROOT"]
@@ -59,6 +73,12 @@ final class AuditModel: ObservableObject {
         receiptURL = repoRoot
             .appendingPathComponent(".invoice-audit-app", isDirectory: true)
             .appendingPathComponent("latest-receipt.json")
+        dbURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("business.sqlite")
+        reportURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("business-report.html")
     }
 
     var selectedInvoice: InvoiceView? {
@@ -82,18 +102,103 @@ final class AuditModel: ObservableObject {
     func loadExistingReceipt() async {
         if FileManager.default.fileExists(atPath: receiptURL.path) {
             await loadReceipt(from: receiptURL)
-        } else {
-            let bundled = repoRoot.appendingPathComponent("demo/scans/audit-receipt.json")
-            if FileManager.default.fileExists(atPath: bundled.path) {
-                await loadReceipt(from: bundled)
+            if hasBusinessDatabase {
+                await generateReport()
+                await askAnalyst()
             }
         }
     }
 
+    var canRunAudit: Bool {
+        invoiceFolderURL != nil && pricebookURL != nil && !isRunning
+    }
+
+    var canAskAnalyst: Bool {
+        hasBusinessDatabase
+            && !analystIsRunning
+            && !analystQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var hasBusinessDatabase: Bool {
+        FileManager.default.fileExists(atPath: dbURL.path)
+    }
+
+    var hasReport: Bool {
+        FileManager.default.fileExists(atPath: reportURL.path)
+    }
+
+    var dbPathForUI: String {
+        dbURL.path
+    }
+
+    func chooseInvoiceFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Invoice Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK {
+            invoiceFolderURL = panel.url
+            status = "Invoice folder selected"
+        }
+    }
+
+    func choosePricebook() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Price History"
+        panel.allowedContentTypes = [
+            UTType.commaSeparatedText,
+            UTType(filenameExtension: "sqlite"),
+            UTType(filenameExtension: "sqlite3"),
+            UTType(filenameExtension: "db")
+        ].compactMap { $0 }
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK {
+            pricebookURL = panel.url
+            status = "Price history selected"
+        }
+    }
+
+    func chooseRules() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Optional Rules File"
+        panel.allowedContentTypes = [.json]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK {
+            rulesURL = panel.url
+            status = "Rules file selected"
+        }
+    }
+
+    func clearRules() {
+        rulesURL = nil
+        status = "Rules cleared"
+    }
+
+    func useSampleData() {
+        invoiceFolderURL = repoRoot.appendingPathComponent("demo/scans", isDirectory: true)
+        pricebookURL = repoRoot.appendingPathComponent("demo/pricebook.csv")
+        rulesURL = repoRoot.appendingPathComponent("demo/floor-rules.json")
+        status = "Sample data selected"
+    }
+
     func runDemoAudit() async {
+        useSampleData()
+        await runAudit()
+    }
+
+    func runAudit() async {
         guard !isRunning else { return }
+        guard let invoiceFolderURL, let pricebookURL else {
+            status = "Choose invoices and price history first"
+            return
+        }
         isRunning = true
-        status = "Auditing demo invoices"
+        status = "Auditing selected invoices"
         verification = "Pending"
         transcript = ""
 
@@ -102,16 +207,21 @@ final class AuditModel: ObservableObject {
                 at: receiptURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            _ = try await runPython(["demo/make_fixtures.py"])
-            let output = try await runPython([
-                "-m", "invoice_audit", "audit", "demo/scans",
-                "--pricebook", "demo/pricebook.csv",
-                "--floor", "demo/floor-rules.json",
+            var args = [
+                "-m", "invoice_audit", "audit-db", invoiceFolderURL.path,
+                "--pricebook", pricebookURL.path,
+                "--db", dbURL.path,
                 "--out", receiptURL.path
-            ])
+            ]
+            if let rulesURL {
+                args.append(contentsOf: ["--floor", rulesURL.path])
+            }
+            let output = try await runPython(args)
             transcript += output
             await loadReceipt(from: receiptURL)
             await verifyReceipt()
+            await generateReport()
+            await askAnalyst()
             status = "Audit complete"
         } catch {
             status = "Audit failed"
@@ -145,12 +255,65 @@ final class AuditModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([receiptURL])
     }
 
+    func revealDatabase() {
+        NSWorkspace.shared.activateFileViewerSelecting([dbURL])
+    }
+
+    func revealReport() {
+        if FileManager.default.fileExists(atPath: reportURL.path) {
+            NSWorkspace.shared.open(reportURL)
+        } else {
+            status = "Run an audit to generate the report"
+        }
+    }
+
+    func generateReport() async {
+        guard FileManager.default.fileExists(atPath: dbURL.path) else { return }
+        do {
+            let output = try await runPython([
+                "-m", "invoice_audit", "report",
+                "--db", dbURL.path,
+                "--out", reportURL.path
+            ])
+            transcript += output
+        } catch {
+            transcript += "\nReport generation failed: \(error.localizedDescription)"
+        }
+    }
+
+    func askAnalyst() async {
+        let question = analystQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        guard FileManager.default.fileExists(atPath: dbURL.path) else {
+            analystAnswer = "No business database yet. Choose sources and run an audit first."
+            return
+        }
+        analystIsRunning = true
+        analystAnswer = "Thinking from the SQL evidence store..."
+        do {
+            let output = try await runPython([
+                "-m", "invoice_audit", "ask",
+                "--db", dbURL.path,
+                question
+            ])
+            analystAnswer = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            analystAnswer = error.localizedDescription
+        }
+        analystIsRunning = false
+    }
+
     private func loadReceipt(from url: URL) async {
         do {
             let data = try Data(contentsOf: url)
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             guard let json else { throw AppError("Receipt is not a JSON object") }
             receipt = ReceiptSummary(json: json, repoRoot: repoRoot)
+            if let receipt {
+                invoiceFolderURL = receipt.invoiceFolderURL
+                pricebookURL = receipt.pricebookURL
+                rulesURL = receipt.rulesURL
+            }
             selectedInvoiceID = receipt?.invoices.first?.id
             selectedFindingID = receipt?.findings.first?.id
             status = "Loaded receipt"
@@ -191,16 +354,29 @@ struct ReceiptSummary {
     let ocrEngine: String
     let extractionEngine: String
     let signature: String
+    let invoiceFolderURL: URL?
+    let pricebookURL: URL?
+    let rulesURL: URL?
+    let pricebookRows: Int
+    let ruleCount: Int?
     let totals: Totals
     let invoices: [InvoiceView]
     let findings: [FindingView]
 
     init(json: [String: Any], repoRoot: URL) {
         let engine = json["engine"] as? [String: Any] ?? [:]
+        let pricebook = json["pricebook"] as? [String: Any] ?? [:]
+        let floorRules = json["floorRules"] as? [String: Any]
+        let scans = json["scans"] as? [[String: Any]] ?? []
         generatedAt = json["generatedAt"] as? String ?? "Unknown"
         ocrEngine = engine["ocr"] as? String ?? "Unknown"
         extractionEngine = engine["extraction"] as? String ?? "Unknown"
         signature = String((json["signature"] as? String ?? "").prefix(16))
+        pricebookURL = Self.url(from: pricebook["path"] as? String, repoRoot: repoRoot)
+        pricebookRows = pricebook["rows"] as? Int ?? 0
+        rulesURL = Self.url(from: floorRules?["path"] as? String, repoRoot: repoRoot)
+        ruleCount = floorRules?["rules"] as? Int
+        invoiceFolderURL = Self.invoiceFolder(from: scans, repoRoot: repoRoot)
         totals = Totals(json: json["totals"] as? [String: Any] ?? [:])
 
         let invoiceRows = json["invoices"] as? [[String: Any]] ?? []
@@ -211,6 +387,16 @@ struct ReceiptSummary {
         findings = queue.enumerated().map { index, row in
             FindingView(index: index, json: row, invoices: parsedInvoices)
         }
+    }
+
+    private static func url(from path: String?, repoRoot: URL) -> URL? {
+        guard let path, !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path, relativeTo: repoRoot).standardizedFileURL
+    }
+
+    private static func invoiceFolder(from scans: [[String: Any]], repoRoot: URL) -> URL? {
+        guard let first = scans.first?["path"] as? String else { return nil }
+        return url(from: first, repoRoot: repoRoot)?.deletingLastPathComponent()
     }
 }
 
@@ -235,23 +421,59 @@ struct InvoiceView: Identifiable {
     let file: String
     let vendor: String
     let invoiceNo: String
+    let category: String
     let disposition: String
     let lineCount: Int
+    let lines: [InvoiceLineView]
     let imageURL: URL?
 
     init(json: [String: Any], repoRoot: URL) {
+        let lineRows = json["lines"] as? [[String: Any]] ?? []
         file = json["file"] as? String ?? "invoice"
         id = file
         vendor = json["vendor"] as? String ?? "Unknown vendor"
         invoiceNo = json["invoice_no"] as? String ?? "Unknown"
+        category = json["category"] as? String ?? "Uncategorized"
         disposition = json["disposition"] as? String ?? "unknown"
-        lineCount = (json["lines"] as? [[String: Any]] ?? []).count
+        lines = lineRows.enumerated().map { InvoiceLineView(index: $0.offset, json: $0.element) }
+        lineCount = lines.count
         if let path = json["path"] as? String {
             let url = URL(fileURLWithPath: path, relativeTo: repoRoot).standardizedFileURL
             imageURL = FileManager.default.fileExists(atPath: url.path) ? url : nil
         } else {
             imageURL = nil
         }
+    }
+}
+
+struct InvoiceLineView: Identifiable {
+    let id: Int
+    let sku: String
+    let description: String
+    let qty: Double
+    let unitPrice: Double
+    let lineTotal: Double
+    let ocrRowText: String
+    let confidence: Double
+    let category: String
+    let policyExposure: Double
+    let grounding: String
+    let verdict: String
+
+    init(index: Int, json: [String: Any]) {
+        id = index
+        sku = json["sku"] as? String ?? ""
+        description = json["description"] as? String ?? ""
+        qty = json["qty"] as? Double ?? 0
+        unitPrice = json["unit_price"] as? Double ?? 0
+        lineTotal = json["line_total"] as? Double ?? 0
+        ocrRowText = json["ocr_row_text"] as? String ?? "\(qty) \(description) \(unitPrice) \(lineTotal)"
+        confidence = json["ocr_min_confidence"] as? Double ?? 0
+        category = json["category"] as? String ?? "Uncategorized"
+        policyExposure = json["policy_delta_total"] as? Double ?? 0
+        let groundingObj = json["grounding"] as? [String: Any] ?? [:]
+        grounding = groundingObj["verdict"] as? String ?? "unknown"
+        verdict = json["verdict"] as? String ?? "unknown"
     }
 }
 
@@ -332,6 +554,7 @@ struct DashboardView: View {
 
             VStack(spacing: 18) {
                 HeaderView()
+                SourceSetupView()
                 if let receipt = model.receipt {
                     ContentView(receipt: receipt)
                 } else {
@@ -368,6 +591,20 @@ struct HeaderView: View {
             .disabled(model.receipt == nil)
 
             Button {
+                model.revealDatabase()
+            } label: {
+                Label("Database", systemImage: "cylinder.split.1x2")
+            }
+            .disabled(model.receipt == nil)
+
+            Button {
+                model.revealReport()
+            } label: {
+                Label("Report", systemImage: "chart.bar.xaxis")
+            }
+            .disabled(!model.hasReport)
+
+            Button {
                 Task { await model.verifyReceipt() }
             } label: {
                 Label("Verify", systemImage: "checkmark.shield")
@@ -375,14 +612,120 @@ struct HeaderView: View {
             .disabled(model.isRunning || model.receipt == nil)
 
             Button {
-                Task { await model.runDemoAudit() }
+                model.useSampleData()
+            } label: {
+                Label("Sample Data", systemImage: "shippingbox")
+            }
+            .disabled(model.isRunning)
+
+            Button {
+                Task { await model.runAudit() }
             } label: {
                 Label(model.isRunning ? "Auditing" : "Run Audit", systemImage: "play.fill")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(model.isRunning)
+            .disabled(!model.canRunAudit)
         }
         .buttonStyle(.bordered)
+    }
+}
+
+struct SourceSetupView: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Data Sources")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text("Choose the invoices and customer price history before running an audit.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    model.useSampleData()
+                } label: {
+                    Label("Use Sample", systemImage: "shippingbox")
+                }
+                .disabled(model.isRunning)
+            }
+
+            HStack(spacing: 10) {
+                SourceCard(
+                    title: "Invoices",
+                    detail: model.invoiceFolderURL?.path(percentEncoded: false)
+                        ?? "No folder selected",
+                    systemImage: "folder",
+                    isReady: model.invoiceFolderURL != nil,
+                    actionTitle: "Choose Folder",
+                    action: model.chooseInvoiceFolder
+                )
+                SourceCard(
+                    title: "Price History",
+                    detail: model.pricebookURL?.lastPathComponent
+                        ?? "CSV or SQLite required",
+                    systemImage: "tablecells",
+                    isReady: model.pricebookURL != nil,
+                    actionTitle: "Choose File",
+                    action: model.choosePricebook
+                )
+                SourceCard(
+                    title: "Rules",
+                    detail: model.rulesURL?.lastPathComponent
+                        ?? "Optional policy/rule file",
+                    systemImage: "slider.horizontal.3",
+                    isReady: model.rulesURL != nil,
+                    actionTitle: model.rulesURL == nil ? "Choose File" : "Change",
+                    action: model.chooseRules,
+                    secondaryTitle: model.rulesURL == nil ? nil : "Clear",
+                    secondaryAction: model.clearRules
+                )
+            }
+        }
+        .padding(14)
+        .background(.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct SourceCard: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let isReady: Bool
+    let actionTitle: String
+    let action: () -> Void
+    var secondaryTitle: String? = nil
+    var secondaryAction: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(isReady ? Color.green : Color.orange)
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Image(systemName: isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                    .foregroundStyle(isReady ? Color.green : Color.orange)
+            }
+            Text(detail)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            HStack {
+                Button(actionTitle, action: action)
+                if let secondaryTitle, let secondaryAction {
+                    Button(secondaryTitle, action: secondaryAction)
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.white.opacity(0.78), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -398,8 +741,21 @@ struct ContentView: View {
             EvidenceView(invoice: model.selectedInvoice)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            FindingsPanel(receipt: receipt)
+            RightRail(receipt: receipt)
                 .frame(width: 390)
+        }
+    }
+}
+
+struct RightRail: View {
+    let receipt: ReceiptSummary
+
+    var body: some View {
+        VStack(spacing: 12) {
+            FindingsPanel(receipt: receipt)
+                .frame(maxHeight: .infinity)
+            AnalystPanel()
+                .frame(height: 255)
         }
     }
 }
@@ -480,7 +836,7 @@ struct InvoiceRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(invoice.file)
                     .font(.system(size: 13, weight: .semibold))
-                Text("\(invoice.lineCount) lines")
+                Text("\(invoice.category) · \(invoice.lineCount) lines")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
@@ -511,31 +867,190 @@ struct EvidenceView: View {
             }
 
             GeometryReader { proxy in
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.white.opacity(0.78))
-                    if let url = invoice?.imageURL,
-                       let image = NSImage(contentsOf: url) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .padding(22)
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                    } else {
-                        VStack(spacing: 12) {
-                            Image(systemName: "doc.viewfinder")
-                                .font(.system(size: 42))
-                                .foregroundStyle(.secondary)
-                            Text("Invoice preview unavailable")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(.secondary)
+                VStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.white.opacity(0.78))
+                        if let url = invoice?.imageURL,
+                           let image = NSImage(contentsOf: url) {
+                            Image(nsImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .padding(18)
+                                .frame(width: proxy.size.width, height: proxy.size.height * 0.56)
+                        } else {
+                            VStack(spacing: 12) {
+                                Image(systemName: "doc.viewfinder")
+                                    .font(.system(size: 42))
+                                    .foregroundStyle(.secondary)
+                                Text("Invoice preview unavailable")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
+                    .frame(height: proxy.size.height * 0.56)
+
+                    ConversionPanel(invoice: invoice)
+                        .frame(height: max(190, proxy.size.height * 0.34))
                 }
             }
         }
         .padding(16)
         .background(.white.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct ConversionPanel: View {
+    let invoice: InvoiceView?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("OCR to Digital")
+                    .font(.system(size: 15, weight: .semibold))
+                Spacer()
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        PanelLabel("OCR Read")
+                        if let invoice, !invoice.lines.isEmpty {
+                            ForEach(invoice.lines) { line in
+                                OCRLine(line: line)
+                            }
+                        } else {
+                            EmptyPanelText("No OCR rows loaded")
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+
+                Divider()
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        PanelLabel("Digital Invoice")
+                        if let invoice, !invoice.lines.isEmpty {
+                            ForEach(invoice.lines) { line in
+                                DigitalLine(line: line)
+                            }
+                        } else {
+                            EmptyPanelText("Run audit to build line items")
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct PanelLabel: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
+    }
+}
+
+struct OCRLine: View {
+    let line: InvoiceLineView
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(line.ocrRowText)
+                .font(.system(size: 11, design: .monospaced))
+                .lineLimit(3)
+            HStack {
+                Text("confidence \(Int(line.confidence * 100))%")
+                Spacer()
+                Text(line.grounding.replacingOccurrences(of: "-", with: " "))
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+        }
+        .padding(9)
+        .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+struct DigitalLine: View {
+    let line: InvoiceLineView
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(line.sku.isEmpty ? "No SKU" : line.sku)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(line.description)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text(line.category)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.blue)
+            }
+
+            HStack {
+                AmountChip(label: "Qty", value: number(line.qty))
+                AmountChip(label: "Unit", value: money(line.unitPrice))
+                AmountChip(label: "Total", value: money(line.lineTotal))
+                if line.policyExposure > 0 {
+                    AmountChip(label: "Policy risk", value: money(line.policyExposure))
+                }
+            }
+        }
+        .font(.system(size: 11, design: .rounded))
+        .padding(9)
+        .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+struct AmountChip: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct EmptyPanelText: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
     }
 }
 
@@ -574,6 +1089,73 @@ struct FindingsPanel: View {
             }
         }
         .padding(16)
+        .background(.white.opacity(0.54), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+struct AnalystPanel: View {
+    @EnvironmentObject private var model: AuditModel
+
+    private let suggestions = [
+        "summary",
+        "show overcharges",
+        "policy exceptions",
+        "OCR evidence issues",
+        "missing price history",
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Business Analyst", systemImage: "bubble.left.and.text.bubble.right")
+                    .font(.system(size: 16, weight: .semibold))
+                Spacer()
+                if model.analystIsRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField("Ask about discrepancies, vendors, evidence...", text: $model.analystQuestion)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit {
+                        Task { await model.askAnalyst() }
+                    }
+                Button {
+                    Task { await model.askAnalyst() }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .disabled(!model.canAskAnalyst)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(suggestions, id: \.self) { suggestion in
+                        Button(suggestion) {
+                            model.analystQuestion = suggestion
+                            Task { await model.askAnalyst() }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!FileManager.default.fileExists(atPath: model.dbPathForUI))
+                    }
+                }
+            }
+
+            ScrollView {
+                Text(model.analystAnswer)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .padding(10)
+            .background(Color.white.opacity(0.82), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .padding(14)
         .background(.white.opacity(0.54), in: RoundedRectangle(cornerRadius: 8))
     }
 }
@@ -617,6 +1199,9 @@ struct ReceiptFacts: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
+            FactRow("Source", receipt.invoiceFolderURL?.lastPathComponent ?? "Unknown")
+            FactRow("Prices", "\(receipt.pricebookRows) rows")
+            FactRow("Rules", receipt.ruleCount.map { "\($0) rules" } ?? "None")
             FactRow("OCR", receipt.ocrEngine)
             FactRow("Engine", receipt.extractionEngine)
             FactRow("Signed", receipt.signature.isEmpty ? "Missing" : "\(receipt.signature)...")
@@ -659,15 +1244,15 @@ struct EmptyStateView: View {
             Image(systemName: "doc.text.viewfinder")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
-            Text("Run the audit")
+            Text("Choose sources to start")
                 .font(.system(size: 28, weight: .semibold, design: .rounded))
-            Text("The app will read the demo invoices, produce the signed receipt, and show the review queue.")
+            Text("Select an invoice folder and a customer price-history file, or load the sample data.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
             Button {
-                Task { await model.runDemoAudit() }
+                model.useSampleData()
             } label: {
-                Label("Run Audit", systemImage: "play.fill")
+                Label("Use Sample Data", systemImage: "shippingbox")
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -694,6 +1279,21 @@ func dollars(_ value: Double) -> String {
     formatter.numberStyle = .currency
     formatter.maximumFractionDigits = 0
     return formatter.string(from: NSNumber(value: value)) ?? "$0"
+}
+
+func money(_ value: Double) -> String {
+    let formatter = NumberFormatter()
+    formatter.numberStyle = .currency
+    formatter.minimumFractionDigits = 2
+    formatter.maximumFractionDigits = 2
+    return formatter.string(from: NSNumber(value: value)) ?? "$0.00"
+}
+
+func number(_ value: Double) -> String {
+    if value.rounded() == value {
+        return String(Int(value))
+    }
+    return String(format: "%.2f", value)
 }
 
 struct AppError: LocalizedError {

@@ -7,13 +7,20 @@ planted cases (overcharge / arithmetic / no-reference) each flag, by name.
 from __future__ import annotations
 
 import subprocess
+import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from invoice_audit.analytics import (  # noqa: E402
+    analytics_text, category_summary, export_csv, slack_payload,
+    vendor_summary, write_html_report)
+from invoice_audit.analyst import answer_question  # noqa: E402
 from invoice_audit.audit import audit_folder  # noqa: E402
+from invoice_audit.categories import classify_item  # noqa: E402
 from invoice_audit.floor import Floor, Rule  # noqa: E402
 from invoice_audit.grounding import (  # noqa: E402
     GROUND_CONFIDENCE, ground_line, stated_total_reconciles)
@@ -21,7 +28,9 @@ from invoice_audit.layout import LineItem, ParsedInvoice, parse_invoice  # noqa:
 from invoice_audit.ocr import AuditError, Token  # noqa: E402
 from invoice_audit.pricebook import PriceBook, ReferenceRow  # noqa: E402
 from invoice_audit.receipt import sign_receipt, verify_receipt, SCHEMA  # noqa: E402
+from invoice_audit.store import connect, count_rows, list_findings, store_receipt  # noqa: E402
 from invoice_audit.validate import arithmetic_flags  # noqa: E402
+from invoice_audit.watcher import run_once_if_changed, source_fingerprint  # noqa: E402
 
 DEMO = ROOT / "demo"
 
@@ -146,6 +155,316 @@ def test_end_to_end_three_planted_cases_flag():
     clean_flags = [i["kind"] for i in receipt["reviewQueue"]
                    if i["invoice"] == "invoice-30072.png"]
     assert set(clean_flags) <= {"low-confidence"}, clean_flags
+
+
+def test_receipt_carries_ocr_row_text_for_conversion_view():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    first_line = receipt["invoices"][0]["lines"][0]
+    assert "HYD-4410" in first_line["ocr_row_text"]
+    assert "$5,980.00" in first_line["ocr_row_text"]
+
+
+def test_receipt_carries_line_and_invoice_categories():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    inv71 = next(i for i in receipt["invoices"] if i["file"] == "invoice-30071.png")
+    inv72 = next(i for i in receipt["invoices"] if i["file"] == "invoice-30072.png")
+    inv73 = next(i for i in receipt["invoices"] if i["file"] == "invoice-30073.png")
+
+    assert inv71["category"] == "Hydraulics"
+    assert inv72["category"] == "Cement & Aggregates"
+    assert inv73["category"] == "Forklift & Material Handling"
+
+    by_sku = {
+        line["sku"]: line
+        for inv in receipt["invoices"]
+        for line in inv["lines"]
+    }
+    assert by_sku["HYD-4410"]["category"] == "Hydraulics"
+    assert by_sku["SEN-7781"]["category"] == "Sensors & Controls"
+    assert by_sku["SEN-7781"]["policy_delta_total"] == 168.0
+    assert classify_item("SEN-7781", "PROXIMITY SENSOR HD",
+                         "YANKEE FORKLIFT PARTS CO")["category"] == "Sensors & Controls"
+
+
+def test_pdf_input_renders_to_ocr_image_and_keeps_source_trace():
+    _ensure_fixtures()
+    from PIL import Image
+
+    with tempfile.TemporaryDirectory() as d:
+        scans = Path(d)
+        pdf = scans / "invoice-30072.pdf"
+        Image.open(DEMO / "scans" / "invoice-30072.png").save(pdf, "PDF", resolution=200)
+
+        receipt = audit_folder(scans, DEMO / "pricebook.csv")
+        assert receipt["totals"]["invoices"] == 1
+        scan = receipt["scans"][0]
+        assert scan["source_kind"] == "pdf"
+        assert scan["source_path"] == str(pdf)
+        assert scan["source_page"] == 1
+        assert Path(scan["path"]).suffix == ".png"
+        assert verify_receipt(receipt, rehash_inputs=True) == []
+
+        pdf.write_bytes(pdf.read_bytes() + b"\n% tamper")
+        assert f"source-hash-changed:{pdf.name}" in verify_receipt(
+            receipt, rehash_inputs=True)
+
+
+def test_sql_store_persists_receipt_findings_and_trace_claims():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "business.sqlite"
+        with connect(db) as con:
+            receipt_id = store_receipt(con, receipt)
+            counts = count_rows(con, [
+                "receipts", "source_files", "invoices", "invoice_lines",
+                "findings", "business_claims",
+            ])
+            assert receipt_id == 1
+            assert counts["receipts"] == 1
+            assert counts["source_files"] == 5  # 3 scans + pricebook + rules
+            assert counts["invoices"] == 3
+            assert counts["invoice_lines"] == 7
+            assert counts["findings"] == 6
+            assert counts["business_claims"] == 66  # 9 claims per line + 3 invoices
+
+            findings = list_findings(con)
+            assert findings[0]["kind"] == "overcharge-flag"
+            assert findings[0]["severity"] == "money"
+            assert findings[0]["sku"] == "HYD-4410"
+            assert findings[0]["category"] == "Hydraulics"
+
+            claim = con.execute(
+                """
+                SELECT object, jeeves_verdict, prel_trace_json, evidence_json
+                FROM business_claims
+                WHERE relation = 'has_unit_price' AND object = '5980.0'
+                """
+            ).fetchone()
+            assert claim is not None
+            assert claim["jeeves_verdict"] == "consistent"
+            assert "HYD-4410" in claim["prel_trace_json"]
+            assert "invoice-30071.png" in claim["evidence_json"]
+
+            category_claim = con.execute(
+                """
+                SELECT object, prel_trace_json
+                FROM business_claims
+                WHERE relation = 'belongs_to_category'
+                  AND object = 'Sensors & Controls'
+                """
+            ).fetchone()
+            assert category_claim is not None
+            assert "SEN-7781" in category_claim["prel_trace_json"]
+
+
+def test_sql_migration_adds_category_columns_before_indexes():
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "old.sqlite"
+        old = sqlite3.connect(db)
+        old.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE receipts (
+                id INTEGER PRIMARY KEY,
+                schema TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                signature TEXT NOT NULL UNIQUE,
+                public_key TEXT NOT NULL,
+                receipt_json TEXT NOT NULL
+            );
+            CREATE TABLE source_files (
+                id INTEGER PRIMARY KEY,
+                receipt_id INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                rows INTEGER,
+                UNIQUE(receipt_id, kind, path)
+            );
+            CREATE TABLE invoices (
+                id INTEGER PRIMARY KEY,
+                receipt_id INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+                source_file_id INTEGER REFERENCES source_files(id) ON DELETE SET NULL,
+                file_name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                vendor TEXT NOT NULL,
+                invoice_no TEXT NOT NULL,
+                invoice_date TEXT NOT NULL,
+                stated_total REAL,
+                stated_total_reconciles INTEGER NOT NULL,
+                disposition TEXT NOT NULL
+            );
+            CREATE TABLE invoice_lines (
+                id INTEGER PRIMARY KEY,
+                invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+                line_index INTEGER NOT NULL,
+                sku TEXT NOT NULL,
+                description TEXT NOT NULL,
+                qty REAL NOT NULL,
+                unit_price REAL NOT NULL,
+                line_total REAL NOT NULL,
+                ocr_row_text TEXT NOT NULL,
+                ocr_min_confidence REAL NOT NULL,
+                price_verdict TEXT NOT NULL,
+                grounding_verdict TEXT NOT NULL,
+                floor_verdict TEXT NOT NULL,
+                matched_on TEXT,
+                reference_median REAL,
+                delta_total REAL NOT NULL,
+                trace_json TEXT NOT NULL,
+                UNIQUE(invoice_id, line_index)
+            );
+            CREATE TABLE findings (
+                id INTEGER PRIMARY KEY,
+                receipt_id INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+                invoice_id INTEGER REFERENCES invoices(id) ON DELETE CASCADE,
+                line_id INTEGER REFERENCES invoice_lines(id) ON DELETE SET NULL,
+                kind TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                evidence_json TEXT NOT NULL
+            );
+            CREATE TABLE business_claims (
+                id INTEGER PRIMARY KEY,
+                receipt_id INTEGER NOT NULL REFERENCES receipts(id) ON DELETE CASCADE,
+                subject TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                object TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                jeeves_verdict TEXT NOT NULL,
+                prel_trace_json TEXT NOT NULL,
+                evidence_json TEXT NOT NULL
+            );
+            """
+        )
+        old.close()
+
+        with connect(db) as con:
+            invoice_cols = {
+                row["name"] for row in con.execute("PRAGMA table_info(invoices)")
+            }
+            line_cols = {
+                row["name"] for row in con.execute("PRAGMA table_info(invoice_lines)")
+            }
+            indexes = {
+                row["name"] for row in con.execute("PRAGMA index_list(invoice_lines)")
+            }
+            assert "category" in invoice_cols
+            assert "category" in line_cols
+            assert "policy_delta_total" in line_cols
+            assert "idx_invoice_lines_category" in indexes
+
+
+def test_sql_backed_analyst_answers_with_citations():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    with tempfile.TemporaryDirectory() as d:
+        with connect(Path(d) / "business.sqlite") as con:
+            store_receipt(con, receipt)
+            summary = answer_question(con, "give me a business summary")
+            assert "invoices: 3" in summary
+            assert "potential overcharge: $6060.00" in summary
+
+            exposure = answer_question(con, "show overcharges")
+            assert "Money exposure" in exposure
+            assert "invoice-30071.png" in exposure
+            assert "source:" in exposure
+
+            why = answer_question(con, "why was invoice-30073 flagged?")
+            assert "Findings for invoice-30073.png" in why
+            assert "floor-veto" in why
+
+            categories = answer_question(con, "show all invoices by category")
+            assert "Invoice category map" in categories
+            assert "Sensors & Controls" in categories
+
+            profit = answer_question(con, "where are we making the most money?")
+            assert "not enough source data connected yet" in profit
+
+
+def test_analytics_exports_and_visual_report_map_business_exposure():
+    _ensure_fixtures()
+    receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv",
+                           floor_path=DEMO / "floor-rules.json")
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        with connect(root / "business.sqlite") as con:
+            store_receipt(con, receipt)
+            cats = {row["category"]: row for row in category_summary(con)}
+            assert cats["Hydraulics"]["total_exposure"] == 6060.0
+            assert cats["Sensors & Controls"]["policy_exposure"] == 168.0
+
+            vendors = {row["vendor"]: row for row in vendor_summary(con)}
+            assert vendors["HARTFORD HYDRAULICS INC"]["total_exposure"] == 6060.0
+            assert vendors["NUTMEG CONCRETE SUPPLY"]["category"] == "Cement & Aggregates"
+
+            text = analytics_text(con)
+            assert "potential exposure: $6,228.00" in text
+            assert "Profit/revenue note" in text
+
+            report = write_html_report(con, root / "business-report.html")
+            html = report.read_text()
+            assert "Invoice Audit Business Map" in html
+            assert "Where money is leaking by category" in html
+            assert "Sensors &amp; Controls" in html
+
+            outputs = export_csv(con, root / "exports")
+            assert {p.name for p in outputs} == {
+                "category_summary.csv", "vendor_summary.csv",
+                "finding_summary.csv", "invoice_lines.csv",
+                "top_findings.csv",
+            }
+            assert "Hydraulics" in (root / "exports" / "category_summary.csv").read_text()
+
+            payload = slack_payload(con)
+            assert "Invoice Audit: 3 invoices" in payload["text"]
+            assert "$6,228.00 potential exposure" in payload["text"]
+
+
+def test_watch_once_skips_unchanged_inputs_and_reacts_to_source_change():
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        pricebook = root / "pricebook.csv"
+        pricebook.write_text((DEMO / "pricebook.csv").read_text())
+        db = root / "business.sqlite"
+        state = root / "watch-state.json"
+        receipt = root / "latest-receipt.json"
+
+        fp1 = source_fingerprint(DEMO / "scans", pricebook)
+        first = run_once_if_changed(
+            DEMO / "scans", pricebook, db, state_path=state,
+            receipt_path=receipt)
+        second = run_once_if_changed(
+            DEMO / "scans", pricebook, db, state_path=state,
+            receipt_path=receipt)
+        assert first["changed"] is True
+        assert first["fingerprint"] == fp1
+        assert second == {
+            "changed": False,
+            "fingerprint": fp1,
+            "reason": "inputs-unchanged",
+        }
+
+        pricebook.write_text(pricebook.read_text() + "NEW-1,NEW ITEM,1.00,2026-08-20\n")
+        third = run_once_if_changed(
+            DEMO / "scans", pricebook, db, state_path=state,
+            receipt_path=receipt)
+        assert third["changed"] is True
+        assert third["fingerprint"] != fp1
+        with connect(db) as con:
+            assert count_rows(con, ["receipts"])["receipts"] == 2
 
 
 # --- grounding: the number pipeline never emits an ungrounded number ---
