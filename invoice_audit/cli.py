@@ -1,7 +1,7 @@
 """CLI — audit scans, persist findings, verify receipts.
 
-  python3 -m invoice_audit audit <scans-dir> --pricebook <csv|sqlite> [--market <csv|sqlite>]
-  python3 -m invoice_audit audit-db <scans-dir> --pricebook <csv|sqlite> --db business.sqlite
+  python3 -m invoice_audit audit <scans-dir> --pricebook <xlsx|csv|sqlite> [--market <csv|sqlite>]
+  python3 -m invoice_audit audit-db <scans-dir> --pricebook <xlsx|csv|sqlite> --db business.sqlite
   python3 -m invoice_audit connector-presets
   python3 -m invoice_audit connector-init --kind local-folder --out source.json ...
   python3 -m invoice_audit connector-sync --config source.json --workspace .sources
@@ -9,13 +9,14 @@
   python3 -m invoice_audit findings --db business.sqlite
   python3 -m invoice_audit ask --db business.sqlite "show overcharges"
   python3 -m invoice_audit analytics --db business.sqlite
+  python3 -m invoice_audit history --db business.sqlite --json
   python3 -m invoice_audit export --db business.sqlite --out exports/
   python3 -m invoice_audit report --db business.sqlite --out report.html
   python3 -m invoice_audit slack-payload --db business.sqlite --out slack.json
   python3 -m invoice_audit email-draft --db business.sqlite --out boss-summary.eml
   python3 -m invoice_audit integration-payload --db business.sqlite --out api.json
   python3 -m invoice_audit send-webhook --db business.sqlite --url <zapier-hook-url>
-  python3 -m invoice_audit watch <scans-dir> --pricebook <csv|sqlite> --db business.sqlite
+  python3 -m invoice_audit watch <scans-dir> --pricebook <xlsx|csv|sqlite> --db business.sqlite
   python3 -m invoice_audit verify <receipt.json>
 """
 from __future__ import annotations
@@ -26,7 +27,7 @@ import sys
 from pathlib import Path
 
 from .analytics import (
-    analytics_text, export_csv, send_webhook, write_email_draft,
+    analytics_text, business_history, export_csv, history_text, send_webhook, write_email_draft,
     write_html_report, write_integration_payload, write_slack_payload)
 from .analyst import answer_question
 from .audit import audit_folder
@@ -100,6 +101,11 @@ def main(argv: list[str] | None = None) -> int:
 
     an = sub.add_parser("analytics", help="show category/vendor exposure map from SQLite")
     an.add_argument("--db", type=Path, required=True)
+
+    hist = sub.add_parser("history", help="show CEO attention journal from SQLite")
+    hist.add_argument("--db", type=Path, required=True)
+    hist.add_argument("--limit", type=int, default=8)
+    hist.add_argument("--json", action="store_true")
 
     ex = sub.add_parser("export", help="export business-analysis CSVs from SQLite")
     ex.add_argument("--db", type=Path, required=True)
@@ -251,6 +257,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "analytics":
             with connect(args.db) as con:
                 print(analytics_text(con))
+            return 0
+        if args.cmd == "history":
+            with connect(args.db) as con:
+                if args.json:
+                    print(json.dumps(business_history(con, limit=args.limit), indent=2, sort_keys=True))
+                else:
+                    print(history_text(con, limit=args.limit))
             return 0
         if args.cmd == "export":
             with connect(args.db) as con:

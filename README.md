@@ -1,6 +1,7 @@
 # invoice-audit — verified vendor-invoice auditing with signed receipts
 
-Drop a folder of scanned vendor invoices + the customer's own price history.
+Drop a folder of scanned vendor invoices + the customer's own Excel/CSV price
+history.
 Out comes: every line item extracted, checked against what they actually paid
 before, every suspicious charge flagged for a human — and a **signed,
 re-runnable receipt** of exactly what was checked, against what, with what
@@ -71,10 +72,10 @@ human review queue                 analyst / CSV / HTML / email / API/webhook
 
 ```bash
 scripts/build.sh                       # compile the on-device OCR binary (macOS)
-python3 -m invoice_audit audit <scans-dir> --pricebook <history.csv|.sqlite> \
+python3 -m invoice_audit audit <scans-dir> --pricebook <history.xlsx|.csv|.sqlite> \
                                           [--floor <rules.json>] \
                                           [--market <market.csv|.sqlite>]
-python3 -m invoice_audit audit-db <scans-dir> --pricebook <history.csv|.sqlite> \
+python3 -m invoice_audit audit-db <scans-dir> --pricebook <history.xlsx|.csv|.sqlite> \
                                              --db business.sqlite \
                                              [--floor <rules.json>] \
                                              [--market <market.csv|.sqlite>]
@@ -87,6 +88,7 @@ python3 -m invoice_audit audit-connector --config source.json --workspace .sourc
 python3 -m invoice_audit findings --db business.sqlite
 python3 -m invoice_audit ask --db business.sqlite "show overcharges"
 python3 -m invoice_audit analytics --db business.sqlite
+python3 -m invoice_audit history --db business.sqlite --json
 python3 -m invoice_audit export --db business.sqlite --out exports/
 python3 -m invoice_audit report --db business.sqlite --out business-report.html
 python3 -m invoice_audit slack-payload --db business.sqlite --out slack.json
@@ -94,14 +96,15 @@ python3 -m invoice_audit email-draft --db business.sqlite --out boss-summary.eml
                                      --attach-report business-report.html
 python3 -m invoice_audit integration-payload --db business.sqlite --out api.json
 python3 -m invoice_audit send-webhook --db business.sqlite --url <zapier-hook-url>
-python3 -m invoice_audit watch <scans-dir> --pricebook <history.csv|.sqlite> \
+python3 -m invoice_audit watch <scans-dir> --pricebook <history.xlsx|.csv|.sqlite> \
                                            --db business.sqlite [--once]
 python3 -m invoice_audit verify <receipt.json>   # re-check signature + input hashes
 ```
 
-- **Price history:** CSV (`sku,description,unit_price,date`) or SQLite (a
-  `price_history(sku,description,unit_price)` table) — the shapes the kist
-  Data-Exchange engine already exports.
+- **Price history / Excel sheets:** `.xlsx`/`.xlsm`, CSV
+  (`sku,description,unit_price,date`), or SQLite (a
+  `price_history(sku,description,unit_price)` table). Excel headers can use
+  common business aliases such as Part Number, Item Description, and Unit Cost.
 - **Market pricing:** optional `--market` CSV/SQLite uses the same schema as a
   benchmark source. Market overages are separate human-review findings and the
   market file hash is verified in the receipt.
@@ -146,10 +149,14 @@ scripts/build_swift_app.sh              # creates dist/Invoice Audit.app
 
 The SwiftUI app opens into a dark, step-based workspace:
 
-1. **Sources** — choose invoice/PDF folder and price history.
+0. **Pulse** — the first-page SOS dashboard: money at risk, data rot, review
+   priorities, recent audit history, category/vendor exposure, and next actions.
+1. **Sources** — choose invoice/PDF folder, Excel/CSV price sheets, and confirm
+   the connected SQLite evidence database.
 2. **Audit** — run OCR/extraction/price checks and create the receipt/report.
 3. **Review** — inspect scan, OCR read, digital line items, and findings.
-4. **Query** — ask the SQL-backed business analyst follow-up questions.
+4. **Query** — ask the SQL-backed business analyst follow-up questions. The
+   advisor is also available as a slideout from the top bar.
 
 Advanced source connectors, market benchmarks, rules, share/export, webhook
 send, and raw artifacts live under the gear icon so the main path stays
@@ -188,7 +195,7 @@ survives `verify` and fails the instant a scan / pricebook / rules byte changes.
 ## Status — PILOT-READY
 
 Happy path proven end-to-end on real (rendered) scans and PDF-rendered pages;
-fail-closed on the error paths; **48/48 tests green** (each stage + the
+fail-closed on the error paths; **49/49 tests green** (each stage + the
 grounding ladder + every floor outcome pinned per-site); receipts sign / verify
 / tamper-detect over scans, original PDFs, pricebook, market benchmark, **and**
 the taught-rules file.

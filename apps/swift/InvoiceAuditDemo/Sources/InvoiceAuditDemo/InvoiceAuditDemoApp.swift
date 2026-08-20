@@ -44,7 +44,7 @@ final class AuditModel: ObservableObject {
     @Published var selectedInvoiceID: String?
     @Published var selectedFindingID: String?
     @Published var isRunning = false
-    @Published var status = "Choose invoice and price-history sources"
+    @Published var status = "Choose invoice sources and Excel price sheets"
     @Published var verification = "Not verified"
     @Published var transcript = ""
     @Published var invoiceFolderURL: URL?
@@ -59,6 +59,7 @@ final class AuditModel: ObservableObject {
     @Published var webhookURL = ""
     @Published var shareStatus = "Generate an email draft or paste a Zapier webhook URL."
     @Published var shareIsRunning = false
+    @Published var journal = BusinessJournal.empty
 
     private let repoRoot: URL
     private let receiptURL: URL
@@ -125,9 +126,12 @@ final class AuditModel: ObservableObject {
         if FileManager.default.fileExists(atPath: receiptURL.path) {
             await loadReceipt(from: receiptURL)
             if hasBusinessDatabase {
+                await loadBusinessJournal()
                 await generateReport()
                 await askAnalyst()
             }
+        } else if hasBusinessDatabase {
+            await loadBusinessJournal()
         }
     }
 
@@ -175,14 +179,16 @@ final class AuditModel: ObservableObject {
 
     func chooseNetworkFolder() {
         chooseInvoiceFolder()
-        connectorStatus = "Network/mounted folder selected. Choose price history, then run audit."
+        connectorStatus = "Network/mounted folder selected. Choose Excel/CSV price sheets, then run audit."
     }
 
     func choosePricebook() {
         let panel = NSOpenPanel()
-        panel.title = "Choose Price History"
+        panel.title = "Choose Excel/CSV Price Sheet"
         panel.allowedContentTypes = [
             UTType.commaSeparatedText,
+            UTType(filenameExtension: "xlsx"),
+            UTType(filenameExtension: "xlsm"),
             UTType(filenameExtension: "sqlite"),
             UTType(filenameExtension: "sqlite3"),
             UTType(filenameExtension: "db")
@@ -192,7 +198,7 @@ final class AuditModel: ObservableObject {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK {
             pricebookURL = panel.url
-            status = "Price history selected"
+            status = "Excel/CSV price sheet selected"
         }
     }
 
@@ -305,7 +311,7 @@ final class AuditModel: ObservableObject {
     func runAudit() async {
         guard !isRunning else { return }
         guard let invoiceFolderURL, let pricebookURL else {
-            status = "Choose invoices and price history first"
+            status = "Choose invoices and Excel sheets first"
             return
         }
         isRunning = true
@@ -335,6 +341,7 @@ final class AuditModel: ObservableObject {
             await loadReceipt(from: receiptURL)
             await verifyReceipt()
             await generateReport()
+            await loadBusinessJournal()
             await askAnalyst()
             status = "Audit complete"
         } catch {
@@ -470,6 +477,28 @@ final class AuditModel: ObservableObject {
             transcript += "\nWebhook send failed: \(error.localizedDescription)"
         }
         shareIsRunning = false
+    }
+
+    func loadBusinessJournal() async {
+        guard FileManager.default.fileExists(atPath: dbURL.path) else {
+            journal = .empty
+            return
+        }
+        do {
+            let output = try await runPython([
+                "-m", "invoice_audit", "history",
+                "--db", dbURL.path,
+                "--json"
+            ])
+            guard let data = output.data(using: .utf8),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw AppError("History command did not return JSON")
+            }
+            journal = BusinessJournal(json: json)
+        } catch {
+            journal = BusinessJournal.error(error.localizedDescription)
+            transcript += "\nHistory load failed: \(error.localizedDescription)"
+        }
     }
 
     func askAnalyst() async {
@@ -613,6 +642,205 @@ struct Totals {
     }
 }
 
+struct BusinessJournal {
+    let generatedAt: String
+    let status: String
+    let overview: JournalOverview
+    let attention: [AttentionItem]
+    let nextActions: [String]
+    let recentRuns: [RecentRun]
+    let topCategories: [ExposureRow]
+    let topVendors: [ExposureRow]
+    let dataQualityIssues: Int?
+
+    static let empty = BusinessJournal(
+        generatedAt: "",
+        status: "Setup needed",
+        overview: .empty,
+        attention: [
+            AttentionItem(
+                priority: "high",
+                title: "No audit data connected",
+                detail: "Choose invoice/receipt sources and Excel price sheets, then run the first audit.",
+                action: "Connect sources"
+            )
+        ],
+        nextActions: [
+            "Choose invoice/PDF/receipt sources.",
+            "Choose Excel/CSV price sheets.",
+            "Run the audit to create the connected database."
+        ],
+        recentRuns: [],
+        topCategories: [],
+        topVendors: [],
+        dataQualityIssues: nil
+    )
+
+    static func error(_ message: String) -> BusinessJournal {
+        BusinessJournal(
+            generatedAt: "",
+            status: "Journal unavailable",
+            overview: .empty,
+            attention: [
+                AttentionItem(
+                    priority: "high",
+                    title: "Could not load attention journal",
+                    detail: message,
+                    action: "Check the database artifact"
+                )
+            ],
+            nextActions: ["Open Settings > Artifacts and verify the database exists."],
+            recentRuns: [],
+            topCategories: [],
+            topVendors: [],
+            dataQualityIssues: nil
+        )
+    }
+
+    init(
+        generatedAt: String,
+        status: String,
+        overview: JournalOverview,
+        attention: [AttentionItem],
+        nextActions: [String],
+        recentRuns: [RecentRun],
+        topCategories: [ExposureRow],
+        topVendors: [ExposureRow],
+        dataQualityIssues: Int?
+    ) {
+        self.generatedAt = generatedAt
+        self.status = status
+        self.overview = overview
+        self.attention = attention
+        self.nextActions = nextActions
+        self.recentRuns = recentRuns
+        self.topCategories = topCategories
+        self.topVendors = topVendors
+        self.dataQualityIssues = dataQualityIssues
+    }
+
+    init(json: [String: Any]) {
+        generatedAt = json["generated_at"] as? String ?? ""
+        status = json["status"] as? String ?? "Unknown"
+        overview = JournalOverview(json: json["overview"] as? [String: Any] ?? [:])
+        attention = (json["attention"] as? [[String: Any]] ?? []).map(AttentionItem.init)
+        nextActions = json["next_actions"] as? [String] ?? []
+        recentRuns = (json["recent_runs"] as? [[String: Any]] ?? []).map(RecentRun.init)
+        topCategories = (json["top_categories"] as? [[String: Any]] ?? []).map {
+            ExposureRow(json: $0, nameKey: "category")
+        }
+        topVendors = (json["top_vendors"] as? [[String: Any]] ?? []).map {
+            ExposureRow(json: $0, nameKey: "vendor")
+        }
+        let dq = json["data_quality"] as? [String: Any] ?? [:]
+        dataQualityIssues = jsonInt(dq, "issue_count")
+    }
+}
+
+struct JournalOverview {
+    let invoices: Int
+    let lines: Int
+    let spend: Double
+    let priceExposure: Double
+    let policyExposure: Double
+    let totalExposure: Double
+    let findings: Int
+
+    static let empty = JournalOverview(
+        invoices: 0,
+        lines: 0,
+        spend: 0,
+        priceExposure: 0,
+        policyExposure: 0,
+        totalExposure: 0,
+        findings: 0
+    )
+
+    init(json: [String: Any]) {
+        invoices = jsonInt(json, "invoices") ?? 0
+        lines = jsonInt(json, "lines") ?? 0
+        spend = jsonDouble(json, "spend")
+        priceExposure = jsonDouble(json, "price_exposure")
+        policyExposure = jsonDouble(json, "policy_exposure")
+        totalExposure = jsonDouble(json, "total_exposure")
+        findings = jsonInt(json, "findings") ?? 0
+    }
+
+    init(
+        invoices: Int,
+        lines: Int,
+        spend: Double,
+        priceExposure: Double,
+        policyExposure: Double,
+        totalExposure: Double,
+        findings: Int
+    ) {
+        self.invoices = invoices
+        self.lines = lines
+        self.spend = spend
+        self.priceExposure = priceExposure
+        self.policyExposure = policyExposure
+        self.totalExposure = totalExposure
+        self.findings = findings
+    }
+}
+
+struct AttentionItem: Identifiable {
+    let id: String
+    let priority: String
+    let title: String
+    let detail: String
+    let action: String
+
+    init(priority: String, title: String, detail: String, action: String) {
+        self.priority = priority
+        self.title = title
+        self.detail = detail
+        self.action = action
+        id = "\(priority)-\(title)-\(detail)"
+    }
+
+    init(json: [String: Any]) {
+        priority = json["priority"] as? String ?? "normal"
+        title = json["title"] as? String ?? "Needs attention"
+        detail = json["detail"] as? String ?? ""
+        action = json["action"] as? String ?? "Review"
+        id = "\(priority)-\(title)-\(detail)"
+    }
+}
+
+struct RecentRun: Identifiable {
+    let id: Int
+    let generatedAt: String
+    let invoices: Int
+    let findings: Int
+    let exposure: Double
+
+    init(json: [String: Any]) {
+        id = jsonInt(json, "receipt_id") ?? 0
+        generatedAt = json["generated_at"] as? String ?? "Unknown"
+        invoices = jsonInt(json, "invoices") ?? 0
+        findings = jsonInt(json, "findings") ?? 0
+        exposure = jsonDouble(json, "total_exposure")
+    }
+}
+
+struct ExposureRow: Identifiable {
+    let id: String
+    let name: String
+    let spend: Double
+    let exposure: Double
+    let findings: Int
+
+    init(json: [String: Any], nameKey: String) {
+        name = json[nameKey] as? String ?? "Unknown"
+        spend = jsonDouble(json, "spend")
+        exposure = jsonDouble(json, "total_exposure")
+        findings = jsonInt(json, "findings") ?? 0
+        id = name
+    }
+}
+
 struct InvoiceView: Identifiable {
     let id: String
     let file: String
@@ -735,6 +963,7 @@ enum Severity {
 }
 
 enum WorkflowStep: String, CaseIterable, Identifiable {
+    case pulse = "Pulse"
     case sources = "Sources"
     case audit = "Audit"
     case review = "Review"
@@ -744,6 +973,7 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
 
     var index: Int {
         switch self {
+        case .pulse: 0
         case .sources: 1
         case .audit: 2
         case .review: 3
@@ -753,7 +983,8 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .sources: "point to data"
+        case .pulse: "SOS attention"
+        case .sources: "connect data"
         case .audit: "run checks"
         case .review: "inspect risk"
         case .query: "ask analyst"
@@ -762,6 +993,7 @@ enum WorkflowStep: String, CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
+        case .pulse: "dot.radiowaves.left.and.right"
         case .sources: "folder.badge.gearshape"
         case .audit: "play.circle.fill"
         case .review: "checklist.checked"
@@ -784,44 +1016,71 @@ enum AppTheme {
 
 struct DashboardView: View {
     @EnvironmentObject private var model: AuditModel
-    @State private var step: WorkflowStep = .sources
+    @State private var step: WorkflowStep = .pulse
     @State private var showingSettings = false
+    @State private var showingAdvisor = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            WizardSidebar(selected: $step)
-                .frame(width: 240)
+        ZStack(alignment: .trailing) {
+            HStack(spacing: 0) {
+                WizardSidebar(selected: $step)
+                    .frame(width: 240)
 
-            VStack(spacing: 0) {
-                WizardTopBar(step: $step, showingSettings: $showingSettings)
+                VStack(spacing: 0) {
+                    WizardTopBar(
+                        step: $step,
+                        showingSettings: $showingSettings,
+                        showingAdvisor: $showingAdvisor
+                    )
                     .frame(height: 68)
 
-                Divider()
-                    .overlay(AppTheme.stroke)
+                    Divider()
+                        .overlay(AppTheme.stroke)
 
-                ZStack {
-                    AppTheme.bg.ignoresSafeArea()
-                    Group {
-                        switch step {
-                        case .sources:
-                            SourcesStepView {
-                                step = .audit
+                    ZStack {
+                        AppTheme.bg.ignoresSafeArea()
+                        Group {
+                            switch step {
+                            case .pulse:
+                                PulseStepView(
+                                    sourceAction: { step = .sources },
+                                    auditAction: { step = .audit },
+                                    reviewAction: { step = .review },
+                                    advisorAction: { showingAdvisor = true }
+                                )
+                            case .sources:
+                                SourcesStepView {
+                                    step = .audit
+                                }
+                            case .audit:
+                                AuditStepView {
+                                    step = .review
+                                }
+                            case .review:
+                                ReviewStepView()
+                            case .query:
+                                QueryStepView()
                             }
-                        case .audit:
-                            AuditStepView {
-                                step = .review
-                            }
-                        case .review:
-                            ReviewStepView()
-                        case .query:
-                            QueryStepView()
                         }
+                        .padding(24)
                     }
-                    .padding(24)
                 }
+            }
+
+            if showingAdvisor {
+                Color.black.opacity(0.38)
+                    .ignoresSafeArea()
+                    .onTapGesture {
+                        showingAdvisor = false
+                    }
+
+                AdvisorDrawer(isOpen: $showingAdvisor)
+                    .frame(width: 440)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .background(AppTheme.bg)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showingAdvisor)
         .sheet(isPresented: $showingSettings) {
             SettingsSheet()
                 .environmentObject(model)
@@ -855,7 +1114,7 @@ struct WizardSidebar: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 SidebarStatusDot(color: model.invoiceFolderURL == nil ? AppTheme.orange : AppTheme.green, text: "Invoices")
-                SidebarStatusDot(color: model.pricebookURL == nil ? AppTheme.orange : AppTheme.green, text: "Price history")
+                SidebarStatusDot(color: model.pricebookURL == nil ? AppTheme.orange : AppTheme.green, text: "Excel sheets")
                 SidebarStatusDot(color: model.receipt == nil ? AppTheme.orange : AppTheme.green, text: "Audit receipt")
                 SidebarStatusDot(color: model.hasBusinessDatabase ? AppTheme.green : AppTheme.orange, text: "SQL evidence")
             }
@@ -871,10 +1130,10 @@ struct WizardSidebar: View {
                         selected = item
                     } label: {
                         HStack(spacing: 10) {
-                            Text("\(item.index)")
+                            Text(item == .pulse ? "SOS" : "\(item.index)")
                                 .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .frame(width: 22, height: 22)
-                                .background(selected == item ? AppTheme.blue : AppTheme.panel2, in: Circle())
+                                .frame(width: item == .pulse ? 34 : 22, height: 22)
+                                .background(selected == item ? AppTheme.blue : AppTheme.panel2, in: Capsule())
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(item.rawValue)
                                     .font(.system(size: 14, weight: .semibold))
@@ -934,18 +1193,22 @@ struct SidebarStatusDot: View {
 struct WizardTopBar: View {
     @Binding var step: WorkflowStep
     @Binding var showingSettings: Bool
+    @Binding var showingAdvisor: Bool
 
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 8) {
             ForEach(WorkflowStep.allCases) { item in
                 Button {
                     step = item
                 } label: {
                     Label(item.rawValue, systemImage: item.systemImage)
-                        .font(.system(size: 13, weight: .bold))
-                        .padding(.horizontal, 13)
+                        .font(.system(size: 12, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 9)
                         .background(step == item ? AppTheme.blue : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(.plain)
             }
@@ -958,12 +1221,24 @@ struct WizardTopBar: View {
                 Text("Search invoices, vendors, findings, and memory...")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(AppTheme.muted)
+                    .lineLimit(1)
                 Spacer()
             }
             .padding(.horizontal, 12)
-            .frame(width: 430, height: 36)
+            .frame(width: 290, height: 36)
             .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(AppTheme.blue.opacity(0.65), lineWidth: 2))
+
+            Button {
+                showingAdvisor = true
+            } label: {
+                Image(systemName: "bubble.left.and.text.bubble.right.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 36, height: 36)
+                    .background(AppTheme.panel, in: Circle())
+                    .overlay(Circle().stroke(AppTheme.stroke, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
 
             Button {
                 showingSettings = true
@@ -981,6 +1256,325 @@ struct WizardTopBar: View {
     }
 }
 
+struct PulseStepView: View {
+    @EnvironmentObject private var model: AuditModel
+    let sourceAction: () -> Void
+    let auditAction: () -> Void
+    let reviewAction: () -> Void
+    let advisorAction: () -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(alignment: .top) {
+                    WizardTitle(
+                        eyebrow: "SOS attention",
+                        title: "What needs your pulse right now",
+                        subtitle: "This is the first screen: current money risk, data rot, review priorities, recent audit history, and the next concrete action."
+                    )
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 8) {
+                        Text(model.journal.status)
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .foregroundStyle(statusColor)
+                        Text(model.journal.generatedAt.isEmpty ? "No journal yet" : model.journal.generatedAt)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(AppTheme.muted)
+                    }
+                }
+
+                HStack(spacing: 14) {
+                    DarkMetricCard(title: "Money at risk", value: dollars(model.journal.overview.totalExposure), color: model.journal.overview.totalExposure > 0 ? AppTheme.red : AppTheme.green)
+                    DarkMetricCard(title: "Scanned spend", value: dollars(model.journal.overview.spend), color: AppTheme.blue)
+                    DarkMetricCard(title: "Open findings", value: "\(model.journal.overview.findings)", color: model.journal.overview.findings > 0 ? AppTheme.orange : AppTheme.green)
+                    DarkMetricCard(title: "Data rot", value: dataRotText, color: (model.journal.dataQualityIssues ?? 0) > 0 ? AppTheme.red : AppTheme.green)
+                }
+
+                HStack(alignment: .top, spacing: 16) {
+                    DarkPanel {
+                        VStack(alignment: .leading, spacing: 14) {
+                            SectionHeader(title: "Needs attention now", systemImage: "exclamationmark.triangle.fill")
+                            ForEach(model.journal.attention) { item in
+                                AttentionRow(item: item)
+                                    .onTapGesture {
+                                        if model.receipt != nil {
+                                            reviewAction()
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .top)
+
+                    VStack(spacing: 16) {
+                        DarkPanel {
+                            VStack(alignment: .leading, spacing: 12) {
+                                SectionHeader(title: "Do next", systemImage: "checklist")
+                                ForEach(Array(model.journal.nextActions.enumerated()), id: \.offset) { index, action in
+                                    HStack(alignment: .top, spacing: 9) {
+                                        Text("\(index + 1)")
+                                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                                            .frame(width: 21, height: 21)
+                                            .background(AppTheme.blue.opacity(0.9), in: Circle())
+                                        Text(action)
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.white.opacity(0.88))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+
+                                HStack {
+                                    Button {
+                                        sourceAction()
+                                    } label: {
+                                        Label("Connect Data", systemImage: "folder.badge.gearshape")
+                                    }
+                                    Button {
+                                        auditAction()
+                                    } label: {
+                                        Label("Run Audit", systemImage: "play.fill")
+                                    }
+                                    .disabled(!model.canRunAudit)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                            }
+                        }
+
+                        DarkPanel {
+                            VStack(alignment: .leading, spacing: 12) {
+                                SectionHeader(title: "Advisor", systemImage: "bubble.left.and.text.bubble.right.fill")
+                                Text("Open the side advisor while you set up sources, review evidence, or prepare the boss report.")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(AppTheme.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Button {
+                                    advisorAction()
+                                } label: {
+                                    Label("Ask Business Advisor", systemImage: "sparkles")
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                    }
+                    .frame(width: 360)
+                }
+
+                HStack(alignment: .top, spacing: 16) {
+                    DarkPanel {
+                        VStack(alignment: .leading, spacing: 12) {
+                            SectionHeader(title: "Recent audit history", systemImage: "clock.arrow.circlepath")
+                            if model.journal.recentRuns.isEmpty {
+                                Text("No completed audit runs yet.")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(AppTheme.muted)
+                            } else {
+                                ForEach(model.journal.recentRuns.prefix(5)) { run in
+                                    RecentRunRow(run: run)
+                                }
+                            }
+                        }
+                    }
+
+                    DarkPanel {
+                        VStack(alignment: .leading, spacing: 12) {
+                            SectionHeader(title: "Where exposure is coming from", systemImage: "chart.bar.xaxis")
+                            if model.journal.topCategories.isEmpty {
+                                EmptyDarkText("Run an audit to build category exposure.")
+                            } else {
+                                ForEach(model.journal.topCategories.prefix(5)) { row in
+                                    ExposureRowView(row: row)
+                                }
+                            }
+                        }
+                    }
+
+                    DarkPanel {
+                        VStack(alignment: .leading, spacing: 12) {
+                            SectionHeader(title: "Vendor focus", systemImage: "building.2")
+                            if model.journal.topVendors.isEmpty {
+                                EmptyDarkText("Vendor exposure appears after the first audit.")
+                            } else {
+                                ForEach(model.journal.topVendors.prefix(5)) { row in
+                                    ExposureRowView(row: row)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 24)
+        }
+    }
+
+    private var statusColor: Color {
+        model.journal.status.localizedCaseInsensitiveContains("SOS") ? AppTheme.red :
+            (model.journal.status.localizedCaseInsensitiveContains("clear") ? AppTheme.green : AppTheme.orange)
+    }
+
+    private var dataRotText: String {
+        guard let count = model.journal.dataQualityIssues else { return "—" }
+        return "\(count)"
+    }
+}
+
+struct SectionHeader: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .foregroundStyle(AppTheme.blue)
+            Text(title)
+                .font(.system(size: 14, weight: .bold))
+            Spacer()
+        }
+    }
+}
+
+struct AttentionRow: View {
+    let item: AttentionItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(item.priority.uppercased())
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(priorityColor)
+                Spacer()
+                Text(item.action)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(AppTheme.muted)
+            }
+            Text(item.title)
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+            Text(item.detail)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.76))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(priorityColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(priorityColor.opacity(0.45), lineWidth: 1))
+    }
+
+    private var priorityColor: Color {
+        switch item.priority.lowercased() {
+        case "high", "money": return AppTheme.red
+        case "policy": return Color.purple
+        case "evidence": return AppTheme.orange
+        case "reference": return AppTheme.blue
+        default: return AppTheme.green
+        }
+    }
+}
+
+struct RecentRunRow: View {
+    let run: RecentRun
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("#\(run.id)")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(AppTheme.blue)
+                .frame(width: 38, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(run.generatedAt)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+                Text("\(run.invoices) invoices · \(run.findings) findings")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AppTheme.muted)
+            }
+            Spacer()
+            Text(dollars(run.exposure))
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(run.exposure > 0 ? AppTheme.red : AppTheme.green)
+        }
+        .padding(10)
+        .background(AppTheme.panel2.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct ExposureRowView: View {
+    let row: ExposureRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(row.name)
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                Spacer()
+                Text(dollars(row.exposure))
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(row.exposure > 0 ? AppTheme.red : AppTheme.green)
+            }
+            Text("\(dollars(row.spend)) spend · \(row.findings) findings")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+        }
+        .padding(10)
+        .background(AppTheme.panel2.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct EmptyDarkText: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(AppTheme.muted)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppTheme.panel2.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct AdvisorDrawer: View {
+    @Binding var isOpen: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Business Financial Advisor")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                    Text("Ask while you connect, audit, or review.")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Spacer()
+                Button {
+                    isOpen = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(width: 30, height: 30)
+                        .background(AppTheme.panel2, in: Circle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            AnalystPanel()
+
+            Spacer()
+        }
+        .padding(18)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(red: 0.010, green: 0.025, blue: 0.040))
+        .overlay(Rectangle().stroke(AppTheme.stroke, lineWidth: 1))
+        .shadow(color: .black.opacity(0.45), radius: 24, x: -12, y: 0)
+    }
+}
+
 struct SourcesStepView: View {
     @EnvironmentObject private var model: AuditModel
     let continueAction: () -> Void
@@ -990,7 +1584,7 @@ struct SourcesStepView: View {
             WizardTitle(
                 eyebrow: "Step 1",
                 title: "Point the system at the data",
-                subtitle: "Keep this simple: invoices plus price history. Market benchmarks, rules, API connectors, and share tools live in Settings."
+                subtitle: "Keep this simple: receipts/invoices, Excel price sheets, and the connected SQL evidence database. Advanced API connectors and sharing live in Settings."
             )
 
             HStack(spacing: 14) {
@@ -1005,21 +1599,29 @@ struct SourcesStepView: View {
                 )
                 WizardSourceCard(
                     number: "2",
-                    title: "Price history",
-                    detail: model.pricebookURL?.lastPathComponent ?? "Choose CSV or SQLite customer history.",
+                    title: "Excel sheets / price data",
+                    detail: model.pricebookURL?.lastPathComponent ?? "Choose .xlsx, .csv, or SQLite customer price data.",
                     systemImage: "tablecells",
                     isReady: model.pricebookURL != nil,
-                    actionTitle: "Choose File",
+                    actionTitle: "Choose Sheet",
                     action: model.choosePricebook
                 )
                 WizardSourceCard(
                     number: "3",
-                    title: "Ready check",
-                    detail: model.canRunAudit ? "Sources are ready. Continue to run the audit." : "Choose invoices and price history to continue.",
-                    systemImage: "checkmark.seal",
-                    isReady: model.canRunAudit,
-                    actionTitle: "Use Sample",
-                    action: model.useSampleData
+                    title: "Connected database",
+                    detail: model.hasBusinessDatabase ? "SQLite evidence store exists and is queryable." : "No connected database yet. Run an audit after choosing data.",
+                    systemImage: "cylinder.split.1x2",
+                    isReady: model.hasBusinessDatabase,
+                    actionTitle: model.hasBusinessDatabase ? "Open Database" : "Create Database",
+                    action: {
+                        if model.hasBusinessDatabase {
+                            model.revealDatabase()
+                        } else if model.canRunAudit {
+                            Task { await model.runAudit() }
+                        } else {
+                            model.status = "Choose invoices and Excel sheets first"
+                        }
+                    }
                 )
             }
 
@@ -1028,6 +1630,11 @@ struct SourcesStepView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(AppTheme.muted)
                 Spacer()
+                Button {
+                    model.useSampleData()
+                } label: {
+                    Label("Use Sample", systemImage: "shippingbox")
+                }
                 Button {
                     continueAction()
                 } label: {
@@ -1454,7 +2061,7 @@ struct SourceSetupView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Data Sources")
                         .font(.system(size: 16, weight: .semibold))
-                    Text("Choose the invoices and customer price history before running an audit.")
+                    Text("Choose invoices and Excel/CSV price sheets before running an audit.")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
@@ -1478,9 +2085,9 @@ struct SourceSetupView: View {
                     action: model.chooseInvoiceFolder
                 )
                 SourceCard(
-                    title: "Price History",
+                    title: "Excel Sheets",
                     detail: model.pricebookURL?.lastPathComponent
-                        ?? "CSV or SQLite required",
+                        ?? ".xlsx, CSV, or SQLite required",
                     systemImage: "tablecells",
                     isReady: model.pricebookURL != nil,
                     actionTitle: "Choose File",
@@ -2005,15 +2612,16 @@ struct AnalystPanel: View {
             ScrollView {
                 Text(model.analystAnswer)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(.white.opacity(0.88))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
             }
             .padding(10)
-            .background(Color.white.opacity(0.82), in: RoundedRectangle(cornerRadius: 8))
+            .background(AppTheme.bg.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(14)
-        .background(.white.opacity(0.54), in: RoundedRectangle(cornerRadius: 8))
+        .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.stroke, lineWidth: 1))
     }
 }
 
@@ -2155,7 +2763,7 @@ struct EmptyStateView: View {
                 .foregroundStyle(.secondary)
             Text("Choose sources to start")
                 .font(.system(size: 28, weight: .semibold, design: .rounded))
-            Text("Select an invoice folder and a customer price-history file, or load the sample data.")
+            Text("Select an invoice folder and Excel/CSV price sheet, or load the sample data.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
             Button {
@@ -2203,6 +2811,35 @@ func number(_ value: Double) -> String {
         return String(Int(value))
     }
     return String(format: "%.2f", value)
+}
+
+func jsonDouble(_ dict: [String: Any], _ key: String) -> Double {
+    if let number = dict[key] as? NSNumber {
+        return number.doubleValue
+    }
+    if let value = dict[key] as? Double {
+        return value
+    }
+    if let value = dict[key] as? String, let parsed = Double(value) {
+        return parsed
+    }
+    return 0
+}
+
+func jsonInt(_ dict: [String: Any], _ key: String) -> Int? {
+    if dict[key] is NSNull {
+        return nil
+    }
+    if let number = dict[key] as? NSNumber {
+        return number.intValue
+    }
+    if let value = dict[key] as? Int {
+        return value
+    }
+    if let value = dict[key] as? String, let parsed = Int(value) {
+        return parsed
+    }
+    return nil
 }
 
 struct AppError: LocalizedError {

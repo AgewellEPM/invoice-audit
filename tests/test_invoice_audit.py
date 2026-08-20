@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -21,8 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from invoice_audit.analytics import (  # noqa: E402
-    analytics_text, category_summary, export_csv, integration_payload,
-    send_webhook, slack_payload, vendor_summary, write_email_draft,
+    analytics_text, business_history, category_summary, export_csv,
+    history_text, integration_payload, send_webhook, slack_payload, vendor_summary, write_email_draft,
     write_html_report, write_integration_payload)
 from invoice_audit.analyst import answer_question  # noqa: E402
 from invoice_audit.audit import audit_folder  # noqa: E402
@@ -132,6 +133,33 @@ def test_pricebook_no_reference_never_silently_passes():
     from invoice_audit.layout import LineItem
     line = LineItem("SEN-7781", "PROXIMITY SENSOR", 1, 88.0, 88.0, 0.99)
     assert _book().check(line)["verdict"] == "no-reference"
+
+
+def test_pricebook_loads_excel_sheets():
+    from invoice_audit.layout import LineItem
+    sheet = """<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>Part Number</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>Item Description</t></is></c>
+      <c r="C1" t="inlineStr"><is><t>Unit Cost</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t>HYD-4410</t></is></c>
+      <c r="B2" t="inlineStr"><is><t>HYDRAULIC PUMP ASSY</t></is></c>
+      <c r="C2"><v>2950</v></c>
+    </row>
+  </sheetData>
+</worksheet>
+"""
+    with tempfile.TemporaryDirectory() as d:
+        xlsx = Path(d) / "price-sheet.xlsx"
+        with zipfile.ZipFile(xlsx, "w") as zf:
+            zf.writestr("xl/worksheets/sheet1.xml", sheet)
+        book = PriceBook.load(xlsx)
+        line = LineItem("HYD-4410", "HYDRAULIC PUMP ASSY", 1, 5980.0, 5980.0, 0.99)
+        assert book.check(line)["verdict"] == "overcharge-flag"
 
 
 # --- receipt: sign, verify, tamper-detect ---
@@ -508,6 +536,14 @@ def test_analytics_exports_and_visual_report_map_business_exposure():
             text = analytics_text(con)
             assert "potential exposure: $6,228.00" in text
             assert "Profit/revenue note" in text
+
+            journal = business_history(con)
+            assert journal["status"] == "SOS: money at risk"
+            assert journal["overview"]["total_exposure"] == 6228.0
+            assert journal["recent_runs"][0]["invoices"] == 3
+            assert "possible leakage" in journal["attention"][0]["title"]
+            assert "Review largest money/policy exposure" in journal["next_actions"][0]
+            assert "SOS Attention Journal" in history_text(con)
 
             report = write_html_report(con, root / "business-report.html")
             html = report.read_text()

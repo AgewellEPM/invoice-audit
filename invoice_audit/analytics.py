@@ -239,6 +239,89 @@ def invoice_line_rows(con: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def business_history(con: sqlite3.Connection, limit: int = 8) -> dict:
+    """CEO-facing attention journal from the persisted evidence store.
+
+    This is the payload for the app's first screen: current pulse, urgent
+    findings, next actions, recent audit runs, and the largest category/vendor
+    exposure maps.
+    """
+    receipt_id = latest_receipt_id(con)
+    if receipt_id is None:
+        return {
+            "generated_at": _utc_now(),
+            "status": "Setup needed",
+            "overview": _empty_overview(),
+            "attention": [
+                {
+                    "priority": "high",
+                    "title": "No audit data connected",
+                    "detail": "Choose invoice/receipt sources and Excel/CSV price sheets, then run the first audit.",
+                    "action": "Connect sources",
+                }
+            ],
+            "next_actions": [
+                "Choose a source folder or API connector.",
+                "Choose customer Excel/CSV price sheets.",
+                "Run the audit to build the first SQL evidence store.",
+            ],
+            "recent_runs": [],
+            "top_categories": [],
+            "top_vendors": [],
+            "data_quality": {"issue_count": None, "issues": [], "timeline": []},
+        }
+
+    totals = overview(con)
+    categories = category_summary(con)
+    vendors = vendor_summary(con)
+    findings = top_findings(con, limit=8)
+    data_quality = _latest_data_quality(con)
+    return {
+        "generated_at": _utc_now(),
+        "status": _attention_status(totals, data_quality),
+        "overview": totals,
+        "attention": _attention_items(totals, categories, vendors, findings, data_quality),
+        "next_actions": _next_actions(totals, findings, data_quality),
+        "recent_runs": _recent_runs(con, limit=limit),
+        "top_categories": categories[:6],
+        "top_vendors": vendors[:6],
+        "data_quality": data_quality,
+    }
+
+
+def history_text(con: sqlite3.Connection, limit: int = 8) -> str:
+    journal = business_history(con, limit=limit)
+    totals = journal["overview"]
+    lines = [
+        "SOS Attention Journal",
+        f"- status: {journal['status']}",
+        f"- scanned spend: {_usd(totals['spend'])}",
+        f"- potential exposure: {_usd(totals['total_exposure'])}",
+        f"- open findings: {totals['findings']}",
+        f"- data-quality issues: {_issue_count_text(journal['data_quality'].get('issue_count'))}",
+        "",
+        "Needs attention now",
+    ]
+    for item in journal["attention"]:
+        lines.append(
+            f"- [{item['priority']}] {item['title']}: {item['detail']} "
+            f"Next: {item['action']}"
+        )
+    lines.extend(["", "Do next"])
+    for action in journal["next_actions"]:
+        lines.append(f"- {action}")
+    lines.extend(["", "Recent audit history"])
+    if not journal["recent_runs"]:
+        lines.append("- No runs stored yet.")
+    for run in journal["recent_runs"]:
+        lines.append(
+            f"- #{run['receipt_id']} {run['generated_at']}: "
+            f"{run['invoices']} invoices, {run['findings']} findings, "
+            f"{_usd(run['total_exposure'])} exposure"
+        )
+    return "\n".join(lines)
+
+
 def export_csv(con: sqlite3.Connection, out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     outputs = [
@@ -647,6 +730,181 @@ def _finding_counts_by(con: sqlite3.Connection, expr: str) -> dict[str, int]:
         """
     ).fetchall()
     return {row["key"]: int(row["findings"] or 0) for row in rows}
+
+
+def _empty_overview() -> dict:
+    return {
+        "invoices": 0,
+        "lines": 0,
+        "spend": 0.0,
+        "price_exposure": 0.0,
+        "policy_exposure": 0.0,
+        "total_exposure": 0.0,
+        "findings": 0,
+    }
+
+
+def _overview_for_receipt(con: sqlite3.Connection, receipt_id: int) -> dict:
+    row = con.execute(
+        """
+        SELECT
+            COUNT(DISTINCT i.id) AS invoices,
+            COUNT(l.id) AS lines,
+            COALESCE(SUM(l.line_total), 0) AS spend,
+            COALESCE(SUM(CASE WHEN l.price_verdict = 'overcharge-flag'
+                              THEN l.delta_total ELSE 0 END), 0) AS price_exposure,
+            COALESCE(SUM(l.policy_delta_total), 0) AS policy_exposure
+        FROM invoices i
+        LEFT JOIN invoice_lines l ON l.invoice_id = i.id
+        WHERE i.receipt_id = ?
+        """,
+        (receipt_id,),
+    ).fetchone()
+    findings = con.execute(
+        "SELECT COUNT(*) AS n FROM findings WHERE receipt_id = ?",
+        (receipt_id,),
+    ).fetchone()
+    price_exposure = float(row["price_exposure"] or 0)
+    policy_exposure = float(row["policy_exposure"] or 0)
+    return {
+        "invoices": int(row["invoices"] or 0),
+        "lines": int(row["lines"] or 0),
+        "spend": round(float(row["spend"] or 0), 2),
+        "price_exposure": round(price_exposure, 2),
+        "policy_exposure": round(policy_exposure, 2),
+        "total_exposure": round(price_exposure + policy_exposure, 2),
+        "findings": int(findings["n"] or 0),
+    }
+
+
+def _recent_runs(con: sqlite3.Connection, limit: int) -> list[dict]:
+    rows = con.execute(
+        """
+        SELECT id, generated_at, receipt_json
+        FROM receipts
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    runs = []
+    for row in rows:
+        receipt_id = int(row["id"])
+        totals = _overview_for_receipt(con, receipt_id)
+        dq = _data_quality_from_receipt_json(row["receipt_json"])
+        runs.append({
+            "receipt_id": receipt_id,
+            "generated_at": row["generated_at"],
+            **totals,
+            "data_quality_issues": dq.get("issue_count"),
+        })
+    return runs
+
+
+def _latest_data_quality(con: sqlite3.Connection) -> dict:
+    row = con.execute(
+        """
+        SELECT receipt_json
+        FROM receipts
+        WHERE id = (SELECT MAX(id) FROM receipts)
+        """
+    ).fetchone()
+    if not row:
+        return {"issue_count": None, "issues": [], "timeline": []}
+    return _data_quality_from_receipt_json(row["receipt_json"])
+
+
+def _data_quality_from_receipt_json(text: str) -> dict:
+    try:
+        receipt = json.loads(text)
+    except json.JSONDecodeError:
+        return {"issue_count": None, "issues": [], "timeline": []}
+    data = receipt.get("dataQuality", {}) or {}
+    issue_count = data.get("issueCount")
+    if issue_count is not None:
+        issue_count = int(issue_count)
+    return {
+        "issue_count": issue_count,
+        "issues": data.get("issues", []) or [],
+        "timeline": data.get("timeline", []) or [],
+    }
+
+
+def _attention_status(totals: dict, data_quality: dict) -> str:
+    if totals["total_exposure"] > 0:
+        return "SOS: money at risk"
+    if totals["findings"] > 0:
+        return "Review needed"
+    if (data_quality.get("issue_count") or 0) > 0:
+        return "Data cleanup needed"
+    return "Clear"
+
+
+def _attention_items(
+    totals: dict,
+    categories: list[dict],
+    vendors: list[dict],
+    findings: list[dict],
+    data_quality: dict,
+) -> list[dict]:
+    items: list[dict] = []
+    if totals["total_exposure"] > 0:
+        category = categories[0]["category"] if categories else "uncategorized spend"
+        vendor = vendors[0]["vendor"] if vendors else "unknown vendor"
+        items.append({
+            "priority": "high",
+            "title": f"{_usd(totals['total_exposure'])} possible leakage",
+            "detail": (
+                f"Largest visible risk is around {category}; top vendor focus is {vendor}."
+            ),
+            "action": "Review money and policy findings first",
+        })
+    if (data_quality.get("issue_count") or 0) > 0:
+        items.append({
+            "priority": "high",
+            "title": f"{data_quality['issue_count']} data-rot issue(s)",
+            "detail": "Dates, duplicates, or unreadable invoice metadata need cleanup before trend analysis is trusted.",
+            "action": "Open data-quality issues",
+        })
+    for finding in findings[:5]:
+        line = "invoice" if finding["line"] is None else f"line {finding['line']}"
+        exposure = finding["price_exposure"] + finding["policy_exposure"]
+        amount = "" if exposure <= 0 else f" ({_usd(exposure)})"
+        items.append({
+            "priority": finding["severity"],
+            "title": f"{finding['kind'].replace('-', ' ').title()}{amount}",
+            "detail": f"{finding['invoice']} {line} {finding['sku']}: {finding['detail']}",
+            "action": "Send to human review",
+        })
+    if not items:
+        items.append({
+            "priority": "normal",
+            "title": "No urgent invoice findings",
+            "detail": "Latest audit has no open exposure, policy, evidence, or reference flags.",
+            "action": "Keep watch running and connect revenue/job-cost data next",
+        })
+    return items
+
+
+def _next_actions(totals: dict, findings: list[dict], data_quality: dict) -> list[str]:
+    actions: list[str] = []
+    if totals["total_exposure"] > 0:
+        actions.append("Review largest money/policy exposure before approving payment.")
+    if any(f["kind"] == "no-reference" for f in findings):
+        actions.append("Add missing purchase-history references for no-reference items.")
+    if any(f["severity"] == "evidence" for f in findings):
+        actions.append("Verify OCR/evidence findings against the invoice image before correcting records.")
+    if (data_quality.get("issue_count") or 0) > 0:
+        actions.append("Fix data-rot issues so dates and duplicates do not corrupt trend analysis.")
+    actions.append("Generate the boss-ready email/report once review decisions are made.")
+    actions.append("Connect revenue, job-cost, ERP, or production sources for profit/margin analysis.")
+    return actions
+
+
+def _issue_count_text(value: object) -> str:
+    if value is None:
+        return "unknown"
+    return str(value)
 
 
 def _write_csv(path: Path, rows: list[dict]) -> Path:
