@@ -16,6 +16,7 @@
   python3 -m invoice_audit email-draft --db business.sqlite --out boss-summary.eml
   python3 -m invoice_audit integration-payload --db business.sqlite --out api.json
   python3 -m invoice_audit send-webhook --db business.sqlite --url <zapier-hook-url>
+  python3 -m invoice_audit legacy-status --json --scan
   python3 -m invoice_audit watch <scans-dir> --pricebook <xlsx|csv|sqlite> --db business.sqlite
   python3 -m invoice_audit verify <receipt.json>
 """
@@ -33,6 +34,7 @@ from .analyst import answer_question
 from .audit import audit_folder
 from .connectors import (
     ConnectorConfig, connector_presets, sync_connector, write_connector_config)
+from .legacy_bridge import bridge_status, legacy_status_text
 from .ocr import AuditError
 from .receipt import verify_receipt
 from .store import connect, list_findings, store_receipt
@@ -134,6 +136,14 @@ def main(argv: list[str] | None = None) -> int:
     wh.add_argument("--db", type=Path, required=True)
     wh.add_argument("--url", required=True)
     wh.add_argument("--timeout", type=float, default=10.0)
+
+    ls = sub.add_parser("legacy-status", help="inspect local Kist/Perslis/VM/RM bridge state")
+    ls.add_argument("--url", default="http://127.0.0.1:8765")
+    ls.add_argument("--scan", action="store_true",
+                    help="also call /api/vm-stage-scan to prove vision status")
+    ls.add_argument("--json", action="store_true")
+    ls.add_argument("--no-fail", action="store_true",
+                    help="always exit 0 after printing status JSON/text")
 
     w = sub.add_parser("watch", help="continuously audit when sources change")
     w.add_argument("scans_dir", type=Path)
@@ -302,6 +312,13 @@ def main(argv: list[str] | None = None) -> int:
                 result = send_webhook(con, args.url, timeout=args.timeout)
             print(json.dumps(result, sort_keys=True))
             return 0 if result.get("ok") else 1
+        if args.cmd == "legacy-status":
+            status = bridge_status(args.url, include_scan=args.scan)
+            if args.json:
+                print(json.dumps(status, indent=2, sort_keys=True))
+            else:
+                print(legacy_status_text(status))
+            return 0 if args.no_fail or status.get("ok") else 1
         if args.cmd == "watch":
             if args.once:
                 result = run_once_if_changed(

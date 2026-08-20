@@ -36,6 +36,7 @@ from invoice_audit.floor import Floor, Rule  # noqa: E402
 from invoice_audit.grounding import (  # noqa: E402
     GROUND_CONFIDENCE, ground_line, stated_total_reconciles)
 from invoice_audit.layout import LineItem, ParsedInvoice, parse_invoice  # noqa: E402
+from invoice_audit.legacy_bridge import summarize_processes  # noqa: E402
 from invoice_audit.ocr import AuditError, Token  # noqa: E402
 from invoice_audit.pricebook import PriceBook, ReferenceRow  # noqa: E402
 from invoice_audit.receipt import sign_receipt, verify_receipt, SCHEMA  # noqa: E402
@@ -160,6 +161,32 @@ def test_pricebook_loads_excel_sheets():
         book = PriceBook.load(xlsx)
         line = LineItem("HYD-4410", "HYDRAULIC PUMP ASSY", 1, 5980.0, 5980.0, 0.99)
         assert book.check(line)["verdict"] == "overcharge-flag"
+
+
+def test_legacy_bridge_process_parser_detects_perslis_vm_and_rm():
+    ps_text = """
+      PID COMMAND
+      101 /Users/lukekist/.kist/apps/desktop-vision-console/server.py --port 8765
+      102 /Users/lukekist/Library/Application Support/LIST Enterprise/Perslis Bridge/current/perslis-bridge
+      103 /Users/lukekist/.perslis/bin/perslis-agent-gateway mcp-serve
+      104 /usr/bin/python3 /Users/lukekist/.kist/apps/desktop-vision-console/vm_guest_mcp.py
+      105 /opt/homebrew/bin/qemu-system-aarch64 -name ghostbridge-win11-power-terminal -qmp unix:/private/tmp/win11/qmp.sock,server,nowait
+      106 /opt/homebrew/bin/qemu-system-i386 -name legacy-win95 -qmp unix:/private/tmp/win95/qmp.sock,server,nowait
+      107 /opt/homebrew/bin/qemu-system-i386 -name ghostbridge-win98-native-drop -qmp unix:/private/tmp/win98/qmp.sock,server,nowait
+    """
+    summary = summarize_processes(ps_text)
+    counts = summary["counts"]
+    assert counts["desktopVision"] == 1
+    assert counts["perslisBridge"] == 1
+    assert counts["perslisRuntime"] == 1
+    assert counts["rmBridge"] == 2
+    assert counts["win11Vm"] == 1
+    assert counts["legacyWin95Vm"] == 1
+    assert counts["legacyWin98Vm"] == 1
+    sockets = {item["qmpSocket"] for item in summary["items"] if item["qmpSocket"]}
+    assert "/private/tmp/win11/qmp.sock" in sockets
+    assert "/private/tmp/win95/qmp.sock" in sockets
+    assert "/private/tmp/win98/qmp.sock" in sockets
 
 
 # --- receipt: sign, verify, tamper-detect ---

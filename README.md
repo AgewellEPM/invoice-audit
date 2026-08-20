@@ -96,6 +96,7 @@ python3 -m invoice_audit email-draft --db business.sqlite --out boss-summary.eml
                                      --attach-report business-report.html
 python3 -m invoice_audit integration-payload --db business.sqlite --out api.json
 python3 -m invoice_audit send-webhook --db business.sqlite --url <zapier-hook-url>
+python3 -m invoice_audit legacy-status --json --scan
 python3 -m invoice_audit watch <scans-dir> --pricebook <history.xlsx|.csv|.sqlite> \
                                            --db business.sqlite [--once]
 python3 -m invoice_audit verify <receipt.json>   # re-check signature + input hashes
@@ -153,10 +154,11 @@ The SwiftUI app opens into a dark, step-based workspace:
    priorities, recent audit history, category/vendor exposure, and next actions.
 1. **Sources** — choose invoice/PDF folder, Excel/CSV price sheets, and confirm
    the connected SQLite evidence database. The Sources screen also exposes the
-   local **Legacy VM/RM bridge** handoff for old payroll, RM, ERP, or plant
-   computers: open Kist Work Agent at `http://127.0.0.1:8765`, extract legacy
-   screens/files/database exports there, then import the resulting PDFs, CSV,
-   Excel, or API JSON here.
+   local **Legacy VM/RM bridge** for old payroll, RM, ERP, or plant computers.
+   It probes Kist Work Agent at `http://127.0.0.1:8765`, the active
+   `/api/vm-stage-status`/scan endpoints, and local Perslis/RM/QEMU processes
+   so the UI can show the real Win11/legacy VM attachment before extracted PDFs,
+   CSV, Excel, or API JSON are imported here.
 2. **Audit** — run OCR/extraction/price checks and create the receipt/report.
 3. **Review** — inspect scan, OCR read, digital line items, and findings.
 4. **Save / Export** — save reports, CSVs, boss-ready email drafts,
@@ -219,7 +221,10 @@ the taught-rules file.
   next brick, not this one. The macOS-Vision + Windows-Tesseract split below is
   the natural place to add it (two engines = the second read).
 - **Deep-legacy price history** (trapped in an app with no export) uses the
-  Perslis VM+OCR screen-read path — real but not wired into this engine yet.
+  Perslis VM+OCR screen-read path. The native app now shows live bridge/VM/RM
+  status through `legacy-status`; direct automatic import from arbitrary legacy
+  apps is still handled through the Kist Agent extraction handoff, not a stable
+  Perslis/RM data API.
 - **Native OAuth connectors** for QuickBooks/NetSuite are not implemented yet.
   Current inbound sources are local/mounted folders, email `.mbox` exports, and
   generic API/Zapier JSON. Outbound sharing is available through email draft,

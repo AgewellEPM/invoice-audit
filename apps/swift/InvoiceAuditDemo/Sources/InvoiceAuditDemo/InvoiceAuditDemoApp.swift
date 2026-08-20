@@ -62,6 +62,7 @@ final class AuditModel: ObservableObject {
     @Published var journal = BusinessJournal.empty
     @Published var activityJournal: [ActivityEvent] = []
     @Published var queryHistory: [QueryHistoryItem] = []
+    @Published var legacyBridge = LegacyBridgeSnapshot.empty
     @Published var legacyBridgeStatus = "Legacy VM/RM bridge not checked."
 
     private let repoRoot: URL
@@ -375,29 +376,38 @@ final class AuditModel: ObservableObject {
         )
     }
 
-    func checkLegacyBridge() async {
-        guard let url = URL(string: "http://127.0.0.1:8765") else { return }
+    func openLegacyStage() {
+        let baseURL = legacyBridge.baseUrl.isEmpty ? "http://127.0.0.1:8765" : legacyBridge.baseUrl
+        let sessionPath = legacyBridge.sessionUrl ?? "/"
+        guard let url = URL(string: baseURL + sessionPath) else { return }
+        NSWorkspace.shared.open(url)
+        logActivity(
+            kind: "legacy-bridge",
+            title: "Opened active VM stage",
+            detail: "Opened \(url.absoluteString) for the connected VM/RM source.",
+            outcome: "stage opened"
+        )
+    }
+
+    func checkLegacyBridge(auto: Bool = false) async {
         do {
-            let (_, response) = try await URLSession.shared.data(from: url)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if (200..<500).contains(code) {
-                legacyBridgeStatus = "Kist Work Agent bridge is reachable on 127.0.0.1:8765."
-                logActivity(
-                    kind: "legacy-bridge",
-                    title: "Checked Legacy VM/RM bridge",
-                    detail: "Local bridge responded with HTTP \(code).",
-                    outcome: "reachable"
-                )
-            } else {
-                legacyBridgeStatus = "Bridge responded unexpectedly: HTTP \(code)."
-                logActivity(
-                    kind: "legacy-bridge",
-                    title: "Legacy bridge check returned unexpected status",
-                    detail: "HTTP \(code)",
-                    outcome: "needs review"
-                )
+            let output = try await runPython([
+                "-m", "invoice_audit", "legacy-status", "--json", "--scan", "--no-fail"
+            ])
+            guard let data = output.data(using: .utf8),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw AppError("Legacy status command did not return JSON")
             }
+            legacyBridge = LegacyBridgeSnapshot(json: json)
+            legacyBridgeStatus = legacyBridge.headline
+            logActivity(
+                kind: "legacy-bridge",
+                title: auto ? "Auto-checked VM/RM bridge" : "Checked VM/RM bridge",
+                detail: legacyBridge.activityDetail,
+                outcome: legacyBridge.isOperational ? "connected" : "needs setup"
+            )
         } catch {
+            legacyBridge = .unavailable(error.localizedDescription)
             legacyBridgeStatus = "Bridge not reachable. Start Kist Work Agent / desktop-vision-console first."
             logActivity(
                 kind: "legacy-bridge",
@@ -1275,6 +1285,269 @@ struct QueryHistoryItem: Identifiable, Codable {
     }
 }
 
+struct LegacyProcessItem: Identifiable {
+    let id: String
+    let pid: Int
+    let kind: String
+    let label: String
+    let name: String?
+    let qmpSocket: String?
+    let commandPreview: String?
+
+    init(json: [String: Any]) {
+        pid = jsonInt(json, "pid") ?? 0
+        kind = json["kind"] as? String ?? "process"
+        label = json["label"] as? String ?? kind
+        name = LegacyBridgeSnapshot.optionalString(json["name"])
+        qmpSocket = LegacyBridgeSnapshot.optionalString(json["qmpSocket"])
+        commandPreview = LegacyBridgeSnapshot.optionalString(json["commandPreview"])
+        id = "\(pid)-\(kind)-\(name ?? label)"
+    }
+
+    var displayName: String {
+        name ?? label
+    }
+}
+
+struct LegacyBridgeSnapshot {
+    let checkedAt: String
+    let baseUrl: String
+    let error: String?
+    let consoleReachable: Bool
+    let activeVmStage: Bool
+    let perslisRuntime: Bool
+    let perslisBridge: Bool
+    let rmBridge: Bool
+    let win11Vm: Bool
+    let legacyVm: Bool
+    let stageOs: String?
+    let stageKind: String?
+    let readyHint: String?
+    let sessionUrl: String?
+    let qmpSocket: String?
+    let scanQueried: Bool
+    let scanOk: Bool
+    let elementCount: Int?
+    let safeMode: Bool?
+    let processItems: [LegacyProcessItem]
+
+    static let empty = LegacyBridgeSnapshot(
+        checkedAt: "",
+        baseUrl: "http://127.0.0.1:8765",
+        error: nil,
+        consoleReachable: false,
+        activeVmStage: false,
+        perslisRuntime: false,
+        perslisBridge: false,
+        rmBridge: false,
+        win11Vm: false,
+        legacyVm: false,
+        stageOs: nil,
+        stageKind: nil,
+        readyHint: nil,
+        sessionUrl: nil,
+        qmpSocket: nil,
+        scanQueried: false,
+        scanOk: false,
+        elementCount: nil,
+        safeMode: nil,
+        processItems: []
+    )
+
+    static func unavailable(_ message: String) -> LegacyBridgeSnapshot {
+        LegacyBridgeSnapshot(
+            checkedAt: appTimestamp(),
+            baseUrl: "http://127.0.0.1:8765",
+            error: message,
+            consoleReachable: false,
+            activeVmStage: false,
+            perslisRuntime: false,
+            perslisBridge: false,
+            rmBridge: false,
+            win11Vm: false,
+            legacyVm: false,
+            stageOs: nil,
+            stageKind: nil,
+            readyHint: nil,
+            sessionUrl: nil,
+            qmpSocket: nil,
+            scanQueried: false,
+            scanOk: false,
+            elementCount: nil,
+            safeMode: nil,
+            processItems: []
+        )
+    }
+
+    init(
+        checkedAt: String,
+        baseUrl: String,
+        error: String?,
+        consoleReachable: Bool,
+        activeVmStage: Bool,
+        perslisRuntime: Bool,
+        perslisBridge: Bool,
+        rmBridge: Bool,
+        win11Vm: Bool,
+        legacyVm: Bool,
+        stageOs: String?,
+        stageKind: String?,
+        readyHint: String?,
+        sessionUrl: String?,
+        qmpSocket: String?,
+        scanQueried: Bool,
+        scanOk: Bool,
+        elementCount: Int?,
+        safeMode: Bool?,
+        processItems: [LegacyProcessItem]
+    ) {
+        self.checkedAt = checkedAt
+        self.baseUrl = baseUrl
+        self.error = error
+        self.consoleReachable = consoleReachable
+        self.activeVmStage = activeVmStage
+        self.perslisRuntime = perslisRuntime
+        self.perslisBridge = perslisBridge
+        self.rmBridge = rmBridge
+        self.win11Vm = win11Vm
+        self.legacyVm = legacyVm
+        self.stageOs = stageOs
+        self.stageKind = stageKind
+        self.readyHint = readyHint
+        self.sessionUrl = sessionUrl
+        self.qmpSocket = qmpSocket
+        self.scanQueried = scanQueried
+        self.scanOk = scanOk
+        self.elementCount = elementCount
+        self.safeMode = safeMode
+        self.processItems = processItems
+    }
+
+    init(json: [String: Any]) {
+        let summary = json["summary"] as? [String: Any] ?? [:]
+        let console = json["console"] as? [String: Any] ?? [:]
+        let processes = json["processes"] as? [String: Any] ?? [:]
+        let items = processes["items"] as? [[String: Any]] ?? []
+
+        checkedAt = json["checkedAt"] as? String ?? appTimestamp()
+        baseUrl = json["baseUrl"] as? String ?? "http://127.0.0.1:8765"
+        error = LegacyBridgeSnapshot.optionalString(json["error"])
+            ?? LegacyBridgeSnapshot.optionalString(console["error"])
+        consoleReachable = LegacyBridgeSnapshot.bool(console, "reachable")
+            || LegacyBridgeSnapshot.bool(summary, "desktopVision")
+        activeVmStage = LegacyBridgeSnapshot.bool(summary, "activeVmStage")
+        perslisRuntime = LegacyBridgeSnapshot.bool(summary, "perslisRuntime")
+        perslisBridge = LegacyBridgeSnapshot.bool(summary, "perslisBridge")
+        rmBridge = LegacyBridgeSnapshot.bool(summary, "rmBridge")
+        win11Vm = LegacyBridgeSnapshot.bool(summary, "win11Vm")
+        legacyVm = LegacyBridgeSnapshot.bool(summary, "legacyVm")
+        stageOs = LegacyBridgeSnapshot.optionalString(summary["stageOs"])
+        stageKind = LegacyBridgeSnapshot.optionalString(summary["stageKind"])
+        readyHint = LegacyBridgeSnapshot.optionalString(summary["readyHint"])
+        sessionUrl = LegacyBridgeSnapshot.optionalString(summary["sessionUrl"])
+        qmpSocket = LegacyBridgeSnapshot.optionalString(summary["qmpSocket"])
+        scanQueried = LegacyBridgeSnapshot.bool(summary, "scanQueried")
+        scanOk = LegacyBridgeSnapshot.bool(summary, "scanOk")
+        elementCount = jsonInt(summary, "elementCount")
+        safeMode = LegacyBridgeSnapshot.optionalBool(summary["safeMode"])
+        processItems = Array(items.map(LegacyProcessItem.init).prefix(8))
+    }
+
+    var hasChecked: Bool {
+        !checkedAt.isEmpty
+    }
+
+    var isOperational: Bool {
+        consoleReachable && activeVmStage && (win11Vm || legacyVm || rmBridge || perslisRuntime)
+    }
+
+    var headline: String {
+        if !hasChecked {
+            return "Legacy VM/RM bridge not checked."
+        }
+        if let error, !consoleReachable {
+            return "Bridge not reachable: \(error)"
+        }
+        if isOperational {
+            return "Live bridge connected: VM-stage active, Perslis/RM detected."
+        }
+        if consoleReachable {
+            return "Kist bridge reachable; VM/RM attachment still needs review."
+        }
+        return "Bridge not reachable. Start Kist Work Agent / desktop-vision-console first."
+    }
+
+    var stageDescription: String {
+        guard activeVmStage else {
+            return "No active VM-stage endpoint is confirmed yet."
+        }
+        var parts = [stageOs ?? "unknown OS"]
+        if let stageKind { parts.append(stageKind) }
+        if let readyHint { parts.append(readyHint) }
+        if let qmpSocket { parts.append(qmpSocket) }
+        return "Active VM-stage: " + parts.joined(separator: " · ")
+    }
+
+    var scanDescription: String {
+        guard scanQueried else {
+            return "Vision scan not queried yet."
+        }
+        let count = elementCount.map { "\($0) elements" } ?? "element count unknown"
+        let safe = safeMode.map { $0 ? "safe mode on" : "safe mode off" } ?? "safe mode unknown"
+        return "Vision scan \(scanOk ? "ok" : "needs review") · \(count) · \(safe)"
+    }
+
+    var activityDetail: String {
+        [
+            "console=\(consoleReachable)",
+            "stage=\(activeVmStage)",
+            "perslis=\(perslisRuntime)",
+            "rm=\(rmBridge)",
+            "win11=\(win11Vm)",
+            "legacy=\(legacyVm)",
+            qmpSocket.map { "qmp=\($0)" },
+            elementCount.map { "elements=\($0)" },
+        ]
+        .compactMap { $0 }
+        .joined(separator: " · ")
+    }
+
+    static func optionalString(_ value: Any?) -> String? {
+        if value == nil || value is NSNull {
+            return nil
+        }
+        if let string = value as? String, !string.isEmpty {
+            return string
+        }
+        return nil
+    }
+
+    private static func bool(_ dict: [String: Any], _ key: String) -> Bool {
+        optionalBool(dict[key]) ?? false
+    }
+
+    private static func optionalBool(_ value: Any?) -> Bool? {
+        if value == nil || value is NSNull {
+            return nil
+        }
+        if let value = value as? Bool {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.boolValue
+        }
+        if let value = value as? String {
+            if ["true", "yes", "1"].contains(value.lowercased()) {
+                return true
+            }
+            if ["false", "no", "0"].contains(value.lowercased()) {
+                return false
+            }
+        }
+        return nil
+    }
+}
+
 struct InvoiceView: Identifiable {
     let id: String
     let file: String
@@ -2096,41 +2369,138 @@ struct LegacyBridgePanel: View {
     @EnvironmentObject private var model: AuditModel
 
     var body: some View {
+        let bridge = model.legacyBridge
         DarkPanel {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("Legacy VM / RM bridge", systemImage: "display.and.arrow.down")
-                        .font(.system(size: 16, weight: .bold))
-                    Text("For old payroll, RM, ERP, or plant computers that cannot export cleanly: open Kist Work Agent, log into the legacy system, extract screens/files/database exports, then bring the extracted PDFs, CSV, Excel, or API JSON back into this audit.")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AppTheme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(model.legacyBridgeStatus)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(model.legacyBridgeStatus.localizedCaseInsensitiveContains("reachable") ? AppTheme.green : AppTheme.orange)
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Legacy VM / RM bridge", systemImage: "display.and.arrow.down")
+                            .font(.system(size: 16, weight: .bold))
+                        Text("For old payroll, RM, ERP, or plant computers that cannot export cleanly. This panel detects the live Kist bridge, Perslis/RM runtime, active QMP VM-stage, and legacy QEMU systems before you extract screens/files/database exports.")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(AppTheme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(model.legacyBridgeStatus)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(bridge.isOperational ? AppTheme.green : AppTheme.orange)
+                    }
+
+                    Spacer()
+
+                    VStack(alignment: .trailing, spacing: 8) {
+                        Button {
+                            Task { await model.checkLegacyBridge() }
+                        } label: {
+                            Label("Check Bridge", systemImage: "antenna.radiowaves.left.and.right")
+                        }
+                        Button {
+                            model.openLegacyBridge()
+                        } label: {
+                            Label("Open Kist Agent", systemImage: "safari")
+                        }
+                        Button {
+                            model.openLegacyStage()
+                        } label: {
+                            Label("Open Active Stage", systemImage: "display")
+                        }
+                        .disabled(bridge.sessionUrl == nil)
+                        Button {
+                            model.copyLegacyBridgeInstructions()
+                        } label: {
+                            Label("Copy Handoff", systemImage: "doc.on.clipboard")
+                        }
+                    }
+                    .buttonStyle(.bordered)
                 }
 
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 8) {
-                    Button {
-                        Task { await model.checkLegacyBridge() }
-                    } label: {
-                        Label("Check Bridge", systemImage: "antenna.radiowaves.left.and.right")
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        LegacyStatusPill(title: "Console", ready: bridge.consoleReachable)
+                        LegacyStatusPill(title: "Perslis", ready: bridge.perslisRuntime)
+                        LegacyStatusPill(title: "RM", ready: bridge.rmBridge)
                     }
-                    Button {
-                        model.openLegacyBridge()
-                    } label: {
-                        Label("Open Kist Agent", systemImage: "safari")
-                    }
-                    Button {
-                        model.copyLegacyBridgeInstructions()
-                    } label: {
-                        Label("Copy Handoff", systemImage: "doc.on.clipboard")
+                    HStack(spacing: 8) {
+                        LegacyStatusPill(title: "VM stage", ready: bridge.activeVmStage)
+                        LegacyStatusPill(title: "Win11", ready: bridge.win11Vm)
+                        LegacyStatusPill(title: "Legacy VM", ready: bridge.legacyVm)
                     }
                 }
-                .buttonStyle(.bordered)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(bridge.stageDescription)
+                    Text(bridge.scanDescription)
+                    if bridge.perslisBridge {
+                        Text("Perslis Bridge process detected locally.")
+                    }
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+
+                if !bridge.processItems.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Detected runtimes")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.88))
+                        ForEach(bridge.processItems.prefix(5)) { item in
+                            LegacyProcessRow(item: item)
+                        }
+                    }
+                }
             }
+        }
+        .task {
+            if !model.legacyBridge.hasChecked {
+                await model.checkLegacyBridge(auto: true)
+            }
+        }
+    }
+}
+
+struct LegacyStatusPill: View {
+    let title: String
+    let ready: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(ready ? AppTheme.green : AppTheme.orange)
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+            Text(ready ? "ready" : "missing")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(ready ? AppTheme.green : AppTheme.orange)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(AppTheme.panel2, in: Capsule())
+        .overlay(Capsule().stroke(ready ? AppTheme.green.opacity(0.35) : AppTheme.orange.opacity(0.25), lineWidth: 1))
+    }
+}
+
+struct LegacyProcessRow: View {
+    let item: LegacyProcessItem
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(item.label)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white.opacity(0.88))
+                .frame(width: 110, alignment: .leading)
+            Text("pid \(item.pid)")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+            Text(item.displayName)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+                .lineLimit(1)
+            if let qmpSocket = item.qmpSocket {
+                Text(qmpSocket)
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(AppTheme.blue)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
         }
     }
 }
