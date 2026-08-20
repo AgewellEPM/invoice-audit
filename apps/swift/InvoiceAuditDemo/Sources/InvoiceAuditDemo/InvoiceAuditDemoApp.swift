@@ -10,7 +10,7 @@ struct InvoiceAuditDemoApp: App {
         WindowGroup {
             DashboardView()
                 .environmentObject(model)
-                .preferredColorScheme(.light)
+                .preferredColorScheme(.dark)
                 .frame(minWidth: 1180, minHeight: 760)
                 .task {
                     await model.loadExistingReceipt()
@@ -734,32 +734,650 @@ enum Severity {
     }
 }
 
+enum WorkflowStep: String, CaseIterable, Identifiable {
+    case sources = "Sources"
+    case audit = "Audit"
+    case review = "Review"
+    case query = "Query"
+
+    var id: String { rawValue }
+
+    var index: Int {
+        switch self {
+        case .sources: 1
+        case .audit: 2
+        case .review: 3
+        case .query: 4
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .sources: "point to data"
+        case .audit: "run checks"
+        case .review: "inspect risk"
+        case .query: "ask analyst"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .sources: "folder.badge.gearshape"
+        case .audit: "play.circle.fill"
+        case .review: "checklist.checked"
+        case .query: "bubble.left.and.text.bubble.right"
+        }
+    }
+}
+
+enum AppTheme {
+    static let bg = Color(red: 0.012, green: 0.024, blue: 0.040)
+    static let panel = Color(red: 0.030, green: 0.054, blue: 0.078)
+    static let panel2 = Color(red: 0.050, green: 0.078, blue: 0.110)
+    static let stroke = Color(red: 0.105, green: 0.180, blue: 0.250)
+    static let blue = Color(red: 0.075, green: 0.480, blue: 0.980)
+    static let green = Color(red: 0.100, green: 0.820, blue: 0.430)
+    static let orange = Color(red: 1.000, green: 0.620, blue: 0.080)
+    static let red = Color(red: 1.000, green: 0.280, blue: 0.320)
+    static let muted = Color(red: 0.560, green: 0.620, blue: 0.700)
+}
+
 struct DashboardView: View {
+    @EnvironmentObject private var model: AuditModel
+    @State private var step: WorkflowStep = .sources
+    @State private var showingSettings = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            WizardSidebar(selected: $step)
+                .frame(width: 240)
+
+            VStack(spacing: 0) {
+                WizardTopBar(step: $step, showingSettings: $showingSettings)
+                    .frame(height: 68)
+
+                Divider()
+                    .overlay(AppTheme.stroke)
+
+                ZStack {
+                    AppTheme.bg.ignoresSafeArea()
+                    Group {
+                        switch step {
+                        case .sources:
+                            SourcesStepView {
+                                step = .audit
+                            }
+                        case .audit:
+                            AuditStepView {
+                                step = .review
+                            }
+                        case .review:
+                            ReviewStepView()
+                        case .query:
+                            QueryStepView()
+                        }
+                    }
+                    .padding(24)
+                }
+            }
+        }
+        .background(AppTheme.bg)
+        .sheet(isPresented: $showingSettings) {
+            SettingsSheet()
+                .environmentObject(model)
+                .frame(width: 720, height: 660)
+        }
+    }
+}
+
+struct WizardSidebar: View {
+    @EnvironmentObject private var model: AuditModel
+    @Binding var selected: WorkflowStep
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(AppTheme.blue, lineWidth: 2)
+                    .frame(width: 22, height: 22)
+                    .overlay(
+                        Circle()
+                            .fill(AppTheme.blue)
+                            .frame(width: 6, height: 6)
+                    )
+                Text("INVOICE")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                Text("AUDIT")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .foregroundStyle(AppTheme.blue)
+            }
+            .padding(.top, 24)
+
+            VStack(alignment: .leading, spacing: 8) {
+                SidebarStatusDot(color: model.invoiceFolderURL == nil ? AppTheme.orange : AppTheme.green, text: "Invoices")
+                SidebarStatusDot(color: model.pricebookURL == nil ? AppTheme.orange : AppTheme.green, text: "Price history")
+                SidebarStatusDot(color: model.receipt == nil ? AppTheme.orange : AppTheme.green, text: "Audit receipt")
+                SidebarStatusDot(color: model.hasBusinessDatabase ? AppTheme.green : AppTheme.orange, text: "SQL evidence")
+            }
+            .padding(12)
+            .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("WORKFLOW")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(AppTheme.muted)
+                ForEach(WorkflowStep.allCases) { item in
+                    Button {
+                        selected = item
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text("\(item.index)")
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .frame(width: 22, height: 22)
+                                .background(selected == item ? AppTheme.blue : AppTheme.panel2, in: Circle())
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.rawValue)
+                                    .font(.system(size: 14, weight: .semibold))
+                                Text(item.subtitle)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(AppTheme.muted)
+                            }
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(selected == item ? AppTheme.blue.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Spacer()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("SYSTEM STATUS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(AppTheme.muted)
+                Text(model.isRunning ? "Processing" : "Ready")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(model.isRunning ? AppTheme.orange : AppTheme.green)
+                Text(model.status)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AppTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 14)
+        .background(Color(red: 0.006, green: 0.030, blue: 0.045))
+    }
+}
+
+struct SidebarStatusDot: View {
+    let color: Color
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 8, height: 8)
+            Text(text)
+                .font(.system(size: 12, weight: .semibold))
+            Spacer()
+        }
+    }
+}
+
+struct WizardTopBar: View {
+    @Binding var step: WorkflowStep
+    @Binding var showingSettings: Bool
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ForEach(WorkflowStep.allCases) { item in
+                Button {
+                    step = item
+                } label: {
+                    Label(item.rawValue, systemImage: item.systemImage)
+                        .font(.system(size: 13, weight: .bold))
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 9)
+                        .background(step == item ? AppTheme.blue : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Spacer()
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(AppTheme.muted)
+                Text("Search invoices, vendors, findings, and memory...")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AppTheme.muted)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .frame(width: 430, height: 36)
+            .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(AppTheme.blue.opacity(0.65), lineWidth: 2))
+
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 15, weight: .bold))
+                    .frame(width: 36, height: 36)
+                    .background(AppTheme.panel, in: Circle())
+                    .overlay(Circle().stroke(AppTheme.stroke, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 22)
+        .background(Color(red: 0.014, green: 0.026, blue: 0.043))
+    }
+}
+
+struct SourcesStepView: View {
+    @EnvironmentObject private var model: AuditModel
+    let continueAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            WizardTitle(
+                eyebrow: "Step 1",
+                title: "Point the system at the data",
+                subtitle: "Keep this simple: invoices plus price history. Market benchmarks, rules, API connectors, and share tools live in Settings."
+            )
+
+            HStack(spacing: 14) {
+                WizardSourceCard(
+                    number: "1",
+                    title: "Invoices / receipts",
+                    detail: model.invoiceFolderURL?.path(percentEncoded: false) ?? "Choose a folder of PDFs, scans, or receipt images.",
+                    systemImage: "folder",
+                    isReady: model.invoiceFolderURL != nil,
+                    actionTitle: "Choose Folder",
+                    action: model.chooseInvoiceFolder
+                )
+                WizardSourceCard(
+                    number: "2",
+                    title: "Price history",
+                    detail: model.pricebookURL?.lastPathComponent ?? "Choose CSV or SQLite customer history.",
+                    systemImage: "tablecells",
+                    isReady: model.pricebookURL != nil,
+                    actionTitle: "Choose File",
+                    action: model.choosePricebook
+                )
+                WizardSourceCard(
+                    number: "3",
+                    title: "Ready check",
+                    detail: model.canRunAudit ? "Sources are ready. Continue to run the audit." : "Choose invoices and price history to continue.",
+                    systemImage: "checkmark.seal",
+                    isReady: model.canRunAudit,
+                    actionTitle: "Use Sample",
+                    action: model.useSampleData
+                )
+            }
+
+            HStack {
+                Text("Advanced source connectors, market benchmarks, rules, and share/export are under the gear.")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(AppTheme.muted)
+                Spacer()
+                Button {
+                    continueAction()
+                } label: {
+                    Label("Continue", systemImage: "arrow.right")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.canRunAudit)
+            }
+            Spacer()
+        }
+    }
+}
+
+struct WizardSourceCard: View {
+    let number: String
+    let title: String
+    let detail: String
+    let systemImage: String
+    let isReady: Bool
+    let actionTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text(number)
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 24, height: 24)
+                    .background(isReady ? AppTheme.green : AppTheme.blue, in: Circle())
+                Spacer()
+                Image(systemName: isReady ? "checkmark.circle.fill" : systemImage)
+                    .foregroundStyle(isReady ? AppTheme.green : AppTheme.muted)
+            }
+            Text(title)
+                .font(.system(size: 18, weight: .bold))
+            Text(detail)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+                .lineLimit(3)
+                .frame(minHeight: 48, alignment: .topLeading)
+            Button(actionTitle, action: action)
+                .buttonStyle(.bordered)
+                .disabled(false)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, minHeight: 190, alignment: .leading)
+        .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(isReady ? AppTheme.green.opacity(0.45) : AppTheme.stroke, lineWidth: 1))
+    }
+}
+
+struct AuditStepView: View {
+    @EnvironmentObject private var model: AuditModel
+    let reviewAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            WizardTitle(
+                eyebrow: "Step 2",
+                title: "Run the audit",
+                subtitle: "OCR extracts line items, checks customer history and optional market/rule layers, then sends costly uncertainty to human review."
+            )
+
+            HStack(spacing: 16) {
+                DarkMetricCard(title: "Invoices", value: model.receipt.map { "\($0.totals.invoices)" } ?? "—", color: AppTheme.blue)
+                DarkMetricCard(title: "Findings", value: model.receipt.map { "\($0.totals.flagged)" } ?? "—", color: AppTheme.orange)
+                DarkMetricCard(title: "Exposure", value: model.receipt.map { dollars($0.totals.potentialOvercharge) } ?? "—", color: AppTheme.red)
+                DarkMetricCard(title: "Verified", value: model.verification, color: model.verification == "Verified" ? AppTheme.green : AppTheme.orange)
+            }
+
+            DarkPanel {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(model.status)
+                        .font(.system(size: 17, weight: .semibold))
+                    Text("The app will create a signed receipt, SQLite evidence store, visual report, and review queue.")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(AppTheme.muted)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            Task { await model.runAudit() }
+                        } label: {
+                            Label(model.isRunning ? "Auditing..." : "Run Audit", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canRunAudit)
+
+                        Button {
+                            Task { await model.verifyReceipt() }
+                        } label: {
+                            Label("Verify", systemImage: "checkmark.shield")
+                        }
+                        .disabled(model.receipt == nil)
+
+                        Button {
+                            model.revealReport()
+                        } label: {
+                            Label("Open Report", systemImage: "chart.bar.xaxis")
+                        }
+                        .disabled(!model.hasReport)
+
+                        Spacer()
+
+                        Button {
+                            reviewAction()
+                        } label: {
+                            Label("Review Findings", systemImage: "arrow.right")
+                        }
+                        .disabled(model.receipt == nil)
+                    }
+                }
+            }
+
+            if !model.transcript.isEmpty {
+                ScrollView {
+                    Text(model.transcript)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(AppTheme.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(14)
+                .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 14))
+            }
+            Spacer()
+        }
+    }
+}
+
+struct ReviewStepView: View {
     @EnvironmentObject private var model: AuditModel
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.965, green: 0.968, blue: 0.972),
-                    Color(red: 0.925, green: 0.936, blue: 0.946)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+        VStack(alignment: .leading, spacing: 18) {
+            WizardTitle(
+                eyebrow: "Step 3",
+                title: "Review what needs human judgment",
+                subtitle: "High-cost uncertainty stays visible: invoice image, OCR read, digital line items, evidence, policy, and price findings."
             )
-            .ignoresSafeArea()
+            if let receipt = model.receipt {
+                ContentView(receipt: receipt)
+            } else {
+                EmptyDarkState(text: "No audit receipt yet. Run Step 2 first.")
+            }
+        }
+    }
+}
 
-            VStack(spacing: 18) {
-                HeaderView()
-                SourceSetupView()
-                if let receipt = model.receipt {
-                    ContentView(receipt: receipt)
-                } else {
-                    EmptyStateView()
+struct QueryStepView: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            WizardTitle(
+                eyebrow: "Query mode",
+                title: "Ask the business analyst",
+                subtitle: "Ask plain-English questions after the audit. Answers cite SQL evidence, categories, vendors, findings, and reports."
+            )
+            AnalystPanel()
+                .frame(maxWidth: 820, minHeight: 360)
+            Spacer()
+        }
+    }
+}
+
+struct SettingsSheet: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Settings")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                    Text("Advanced sources, rules, and share/connect live here.")
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Spacer()
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 24))
+                    .foregroundStyle(AppTheme.blue)
+            }
+
+            TabView {
+                AdvancedSourcesSettings()
+                    .tabItem { Label("Sources", systemImage: "folder.badge.gearshape") }
+                SharePanel()
+                    .tabItem { Label("Share", systemImage: "square.and.arrow.up") }
+                ArtifactSettings()
+                    .tabItem { Label("Artifacts", systemImage: "doc.text.magnifyingglass") }
+            }
+        }
+        .padding(22)
+        .background(AppTheme.bg)
+    }
+}
+
+struct AdvancedSourcesSettings: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Advanced source setup")
+                .font(.system(size: 17, weight: .bold))
+
+            HStack(spacing: 12) {
+                SourceCard(
+                    title: "Market",
+                    detail: model.marketURL?.lastPathComponent ?? "Optional benchmark CSV/SQLite",
+                    systemImage: "chart.line.uptrend.xyaxis",
+                    isReady: model.marketURL != nil,
+                    actionTitle: model.marketURL == nil ? "Choose File" : "Change",
+                    action: model.chooseMarket,
+                    secondaryTitle: model.marketURL == nil ? nil : "Clear",
+                    secondaryAction: model.clearMarket
+                )
+                SourceCard(
+                    title: "Rules",
+                    detail: model.rulesURL?.lastPathComponent ?? "Optional policy/rule file",
+                    systemImage: "slider.horizontal.3",
+                    isReady: model.rulesURL != nil,
+                    actionTitle: model.rulesURL == nil ? "Choose File" : "Change",
+                    action: model.chooseRules,
+                    secondaryTitle: model.rulesURL == nil ? nil : "Clear",
+                    secondaryAction: model.clearRules
+                )
+            }
+
+            DarkPanel {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Source Connectors", systemImage: "point.3.connected.trianglepath.dotted")
+                        .font(.system(size: 15, weight: .bold))
+                    Text("Use this for network folders, API/Zapier pull sources, and future QuickBooks/NetSuite presets.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(AppTheme.muted)
+                    HStack {
+                        Button {
+                            model.chooseNetworkFolder()
+                        } label: {
+                            Label("Network Folder", systemImage: "externaldrive.connected.to.line.below")
+                        }
+                        TextField("Paste API/Zapier source URL", text: $model.sourceAPIURL)
+                            .textFieldStyle(.roundedBorder)
+                        Button {
+                            Task { await model.pullAPIConnector() }
+                        } label: {
+                            Label("Pull Data", systemImage: "arrow.down.doc")
+                        }
+                        .disabled(model.sourceAPIURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isRunning)
+                    }
+                    Text(model.connectorStatus)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(AppTheme.muted)
                 }
             }
-            .padding(22)
+            Spacer()
         }
+        .padding(.top, 12)
+    }
+}
+
+struct ArtifactSettings: View {
+    @EnvironmentObject private var model: AuditModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Audit artifacts")
+                .font(.system(size: 17, weight: .bold))
+            Button("Reveal Receipt") { model.revealReceipt() }
+                .disabled(model.receipt == nil)
+            Button("Reveal Database") { model.revealDatabase() }
+                .disabled(model.receipt == nil)
+            Button("Open Report") { model.revealReport() }
+                .disabled(!model.hasReport)
+            Button("Verify Receipt") {
+                Task { await model.verifyReceipt() }
+            }
+            .disabled(model.receipt == nil)
+            Spacer()
+        }
+        .padding(.top, 12)
+    }
+}
+
+struct WizardTitle: View {
+    let eyebrow: String
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("✦ \(eyebrow.uppercased())")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(AppTheme.blue)
+            Text(title)
+                .font(.system(size: 30, weight: .bold, design: .rounded))
+            Text(subtitle)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+                .frame(maxWidth: 820, alignment: .leading)
+        }
+    }
+}
+
+struct DarkMetricCard: View {
+    let title: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(value)
+                .font(.system(size: 27, weight: .bold, design: .rounded))
+                .foregroundStyle(color)
+            Text(title)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(AppTheme.muted)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(AppTheme.stroke, lineWidth: 1))
+    }
+}
+
+struct DarkPanel<Content: View>: View {
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(AppTheme.stroke, lineWidth: 1))
+    }
+}
+
+struct EmptyDarkState: View {
+    let text: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 42))
+                .foregroundStyle(AppTheme.blue)
+            Text(text)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(AppTheme.muted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.panel, in: RoundedRectangle(cornerRadius: 18))
     }
 }
 
@@ -995,10 +1613,6 @@ struct RightRail: View {
         VStack(spacing: 12) {
             FindingsPanel(receipt: receipt)
                 .frame(maxHeight: .infinity)
-            AnalystPanel()
-                .frame(height: 245)
-            SharePanel()
-                .frame(height: 175)
         }
     }
 }

@@ -144,13 +144,16 @@ scripts/run_swift_app.sh
 scripts/build_swift_app.sh              # creates dist/Invoice Audit.app
 ```
 
-The SwiftUI app opens directly into the audit workspace: choose invoice/PDF
-sources, choose price-history and optional market-benchmark CSV/SQLite files,
-pull source data from a mounted network folder or API/Zapier URL, run the
-audit, inspect the scan plus OCR-to-digital conversion, review flagged findings,
-verify the receipt, ask the SQL-backed business analyst follow-up questions,
-open the visual business report, generate a boss-ready email draft, export an
-API file, or paste a Zapier/webhook URL and send the business report JSON.
+The SwiftUI app opens into a dark, step-based workspace:
+
+1. **Sources** — choose invoice/PDF folder and price history.
+2. **Audit** — run OCR/extraction/price checks and create the receipt/report.
+3. **Review** — inspect scan, OCR read, digital line items, and findings.
+4. **Query** — ask the SQL-backed business analyst follow-up questions.
+
+Advanced source connectors, market benchmarks, rules, share/export, webhook
+send, and raw artifacts live under the gear icon so the main path stays
+nontechnical.
 
 On Windows 11, use the native launcher:
 
