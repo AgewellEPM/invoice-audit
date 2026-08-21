@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Foundation
 import UniformTypeIdentifiers
 
 @main
@@ -62,6 +63,7 @@ final class AuditModel: ObservableObject {
     @Published var journal = BusinessJournal.empty
     @Published var activityJournal: [ActivityEvent] = []
     @Published var queryHistory: [QueryHistoryItem] = []
+    @Published var financeNotes: [FinanceNote] = []
     @Published var legacyBridge = LegacyBridgeSnapshot.empty
     @Published var legacyBridgeStatus = "Legacy VM/RM bridge not checked."
 
@@ -76,6 +78,7 @@ final class AuditModel: ObservableObject {
     private let connectorWorkspaceURL: URL
     private let activityJournalURL: URL
     private let queryHistoryURL: URL
+    private let financeNotesURL: URL
 
     init() {
         let envRoot = ProcessInfo.processInfo.environment["INVOICE_AUDIT_ROOT"]
@@ -118,6 +121,9 @@ final class AuditModel: ObservableObject {
         queryHistoryURL = repoRoot
             .appendingPathComponent(".invoice-audit-app", isDirectory: true)
             .appendingPathComponent("query-history.jsonl")
+        financeNotesURL = repoRoot
+            .appendingPathComponent(".invoice-audit-app", isDirectory: true)
+            .appendingPathComponent("finance-notes.jsonl")
     }
 
     var selectedInvoice: InvoiceView? {
@@ -847,9 +853,31 @@ final class AuditModel: ObservableObject {
         NSWorkspace.shared.activateFileViewerSelecting([queryHistoryURL])
     }
 
+    func revealFinanceNotes() {
+        NSWorkspace.shared.activateFileViewerSelecting([financeNotesURL])
+    }
+
+    func addFinanceNote(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let note = FinanceNote(timestamp: appTimestamp(), text: trimmed)
+        financeNotes.insert(note, at: 0)
+        if financeNotes.count > 300 {
+            financeNotes.removeLast(financeNotes.count - 300)
+        }
+        appendJSONLine(note, to: financeNotesURL)
+        logActivity(
+            kind: "note",
+            title: "Added finance note",
+            detail: trimmed,
+            outcome: "captured"
+        )
+    }
+
     private func loadAppJournal() {
         activityJournal = loadJSONLines(ActivityEvent.self, from: activityJournalURL, limit: 300)
         queryHistory = loadJSONLines(QueryHistoryItem.self, from: queryHistoryURL, limit: 120)
+        financeNotes = loadJSONLines(FinanceNote.self, from: financeNotesURL, limit: 300)
     }
 
     private func logActivity(kind: String, title: String, detail: String, outcome: String) {
@@ -1282,6 +1310,22 @@ struct QueryHistoryItem: Identifiable, Codable {
         self.question = question
         self.answer = answer
         self.outcome = outcome
+    }
+}
+
+struct FinanceNote: Identifiable, Codable {
+    let id: String
+    let timestamp: String
+    let text: String
+
+    init(
+        id: String = UUID().uuidString,
+        timestamp: String,
+        text: String
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.text = text
     }
 }
 
@@ -2047,6 +2091,8 @@ struct PulseStepView: View {
                     )
                 }
 
+                FinanceDailyJournalPanel()
+
                 MoneyLineagePanel(reviewAction: reviewAction)
 
                 HStack(alignment: .top, spacing: 16) {
@@ -2266,6 +2312,270 @@ struct MoneyLineagePanel: View {
             invoice.lines.first(where: { $0.id == index })
         } ?? invoice.lines.first(where: { $0.verdict == "overcharge-flag" }) ?? invoice.lines.first
         return MoneyTrace(finding: finding, invoice: invoice, line: line)
+    }
+}
+
+struct FinanceDailyJournalPanel: View {
+    @EnvironmentObject private var model: AuditModel
+    @State private var selectedDay = Date()
+    @State private var noteText = ""
+
+    private let daysToShow = 10
+
+    var body: some View {
+        DarkPanel {
+            HStack(alignment: .top, spacing: 18) {
+                VStack(alignment: .leading, spacing: 12) {
+                    SectionHeader(title: "Finance journal calendar", systemImage: "calendar")
+                    ForEach(recentDays(count: daysToShow), id: \.self) { day in
+                        Button {
+                            selectedDay = day
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(dayLabel(day))
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text(monthDayLabel(day))
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundStyle(AppTheme.muted)
+                                }
+                                Spacer()
+                                Text("\(itemCount(for: day))")
+                                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                                    .foregroundStyle(isSelected(day) ? .white : AppTheme.blue)
+                                    .frame(width: 25, height: 22)
+                                    .background(isSelected(day) ? AppTheme.blue : AppTheme.panel2, in: Capsule())
+                            }
+                            .padding(10)
+                            .background(isSelected(day) ? AppTheme.blue.opacity(0.20) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected(day) ? AppTheme.blue.opacity(0.70) : Color.clear, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .frame(width: 235)
+
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Journal — \(longDateLabel(selectedDay))")
+                                .font(.system(size: 22, weight: .bold, design: .rounded))
+                            Text(daySummary)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(AppTheme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        HStack(spacing: 10) {
+                            JournalStat(value: "\(dayEvents.count)", label: "items captured", color: AppTheme.blue)
+                            JournalStat(value: "\(dayQueries.count)", label: "queries", color: Color.purple)
+                            JournalStat(value: "\(dayFailures.count)", label: "failed", color: dayFailures.isEmpty ? AppTheme.green : AppTheme.red)
+                            JournalStat(value: "\(dayNotes.count)", label: "notes", color: AppTheme.orange)
+                        }
+                    }
+
+                    HStack(spacing: 9) {
+                        TextField("Capture a finance note, decision, vendor call, or thing to check tomorrow...", text: $noteText)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit(saveNote)
+                        Button {
+                            saveNote()
+                        } label: {
+                            Label("New Note", systemImage: "square.and.pencil")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Reveal") {
+                            model.revealFinanceNotes()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    HStack(alignment: .top, spacing: 14) {
+                        JournalColumn(
+                            title: "What got done",
+                            systemImage: "checkmark.circle",
+                            rows: completedRows,
+                            empty: "No completed work recorded for this day."
+                        )
+                        JournalColumn(
+                            title: "What we learned",
+                            systemImage: "lightbulb",
+                            rows: learnedRows,
+                            empty: "No learned items yet."
+                        )
+                        JournalColumn(
+                            title: "Watch / failed",
+                            systemImage: "exclamationmark.triangle",
+                            rows: failureRows,
+                            empty: "No failures logged."
+                        )
+                    }
+
+                    if !dayQueries.isEmpty || !dayNotes.isEmpty {
+                        HStack(alignment: .top, spacing: 14) {
+                            JournalColumn(
+                                title: "Past searches",
+                                systemImage: "magnifyingglass.circle",
+                                rows: queryRows,
+                                empty: "No analyst searches for this day."
+                            )
+                            JournalColumn(
+                                title: "Notes",
+                                systemImage: "note.text",
+                                rows: noteRows,
+                                empty: "No finance notes for this day."
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var dayEvents: [ActivityEvent] {
+        model.activityJournal.filter { isSameJournalDay($0.timestamp, selectedDay) }
+    }
+
+    private var dayQueries: [QueryHistoryItem] {
+        model.queryHistory.filter { isSameJournalDay($0.timestamp, selectedDay) }
+    }
+
+    private var dayNotes: [FinanceNote] {
+        model.financeNotes.filter { isSameJournalDay($0.timestamp, selectedDay) }
+    }
+
+    private var dayFailures: [ActivityEvent] {
+        dayEvents.filter { $0.outcome.localizedCaseInsensitiveContains("fail") }
+    }
+
+    private var completedRows: [JournalRowData] {
+        dayEvents
+            .filter { !$0.outcome.localizedCaseInsensitiveContains("fail") }
+            .prefix(6)
+            .map { JournalRowData(time: journalTime($0.timestamp), title: $0.title, detail: "\($0.kind) · \($0.outcome)") }
+    }
+
+    private var learnedRows: [JournalRowData] {
+        let learned = dayEvents.filter {
+            $0.outcome.localizedCaseInsensitiveContains("learn")
+                || $0.outcome.localizedCaseInsensitiveContains("connected")
+                || $0.outcome.localizedCaseInsensitiveContains("verified")
+                || $0.outcome.localizedCaseInsensitiveContains("captured")
+        }
+        return learned.prefix(6).map {
+            JournalRowData(time: journalTime($0.timestamp), title: $0.title, detail: $0.detail)
+        }
+    }
+
+    private var failureRows: [JournalRowData] {
+        dayFailures.prefix(6).map {
+            JournalRowData(time: journalTime($0.timestamp), title: $0.title, detail: $0.detail)
+        }
+    }
+
+    private var queryRows: [JournalRowData] {
+        dayQueries.prefix(6).map {
+            JournalRowData(time: journalTime($0.timestamp), title: $0.question, detail: $0.outcome)
+        }
+    }
+
+    private var noteRows: [JournalRowData] {
+        dayNotes.prefix(6).map {
+            JournalRowData(time: journalTime($0.timestamp), title: $0.text, detail: "manual note")
+        }
+    }
+
+    private var daySummary: String {
+        if dayEvents.isEmpty && dayQueries.isEmpty && dayNotes.isEmpty {
+            return "No captured finance work yet. Notes, analyst searches, audits, exports, bridge checks, and failures will appear here by day."
+        }
+        let done = completedRows.count
+        let failed = dayFailures.count
+        let queries = dayQueries.count
+        let notes = dayNotes.count
+        return "\(done) completed work item(s), \(queries) analyst search(es), \(notes) note(s), \(failed) failure(s). This is the day log for what changed, what was learned, and what still needs attention."
+    }
+
+    private func saveNote() {
+        let trimmed = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        model.addFinanceNote(trimmed)
+        selectedDay = Date()
+        noteText = ""
+    }
+
+    private func itemCount(for day: Date) -> Int {
+        model.activityJournal.filter { isSameJournalDay($0.timestamp, day) }.count
+            + model.queryHistory.filter { isSameJournalDay($0.timestamp, day) }.count
+            + model.financeNotes.filter { isSameJournalDay($0.timestamp, day) }.count
+    }
+
+    private func isSelected(_ day: Date) -> Bool {
+        Calendar.current.isDate(day, inSameDayAs: selectedDay)
+    }
+}
+
+struct JournalStat: View {
+    let value: String
+    let label: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(value)
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(color)
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(AppTheme.muted)
+                .lineLimit(1)
+        }
+        .frame(width: 88, alignment: .leading)
+    }
+}
+
+struct JournalRowData: Identifiable {
+    let id = UUID()
+    let time: String
+    let title: String
+    let detail: String
+}
+
+struct JournalColumn: View {
+    let title: String
+    let systemImage: String
+    let rows: [JournalRowData]
+    let empty: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            SectionHeader(title: title, systemImage: systemImage)
+            if rows.isEmpty {
+                EmptyDarkText(empty)
+            } else {
+                ForEach(rows) { row in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(row.time)
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundStyle(AppTheme.blue)
+                            Spacer()
+                        }
+                        Text(row.title)
+                            .font(.system(size: 12, weight: .bold))
+                            .lineLimit(2)
+                        Text(row.detail)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(AppTheme.muted)
+                            .lineLimit(2)
+                    }
+                    .padding(9)
+                    .background(AppTheme.panel2.opacity(0.62), in: RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
@@ -4161,6 +4471,61 @@ func number(_ value: Double) -> String {
 
 func signedPercent(_ value: Double) -> String {
     String(format: "%+.1f%%", value)
+}
+
+func recentDays(count: Int) -> [Date] {
+    let calendar = Calendar.current
+    let start = calendar.startOfDay(for: Date())
+    return (0..<count).compactMap { offset in
+        calendar.date(byAdding: .day, value: -offset, to: start)
+    }
+}
+
+func parseJournalDate(_ timestamp: String) -> Date? {
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = fractional.date(from: timestamp) {
+        return date
+    }
+    let plain = ISO8601DateFormatter()
+    plain.formatOptions = [.withInternetDateTime]
+    return plain.date(from: timestamp)
+}
+
+func isSameJournalDay(_ timestamp: String, _ day: Date) -> Bool {
+    guard let date = parseJournalDate(timestamp) else { return false }
+    return Calendar.current.isDate(date, inSameDayAs: day)
+}
+
+func journalTime(_ timestamp: String) -> String {
+    guard let date = parseJournalDate(timestamp) else { return "—" }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm"
+    return formatter.string(from: date)
+}
+
+func dayLabel(_ date: Date) -> String {
+    if Calendar.current.isDateInToday(date) {
+        return "Today"
+    }
+    if Calendar.current.isDateInYesterday(date) {
+        return "Yesterday"
+    }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "EEEE"
+    return formatter.string(from: date)
+}
+
+func monthDayLabel(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMM d, yyyy"
+    return formatter.string(from: date)
+}
+
+func longDateLabel(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMMM d, yyyy"
+    return formatter.string(from: date)
 }
 
 func appTimestamp() -> String {
