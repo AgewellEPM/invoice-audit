@@ -576,17 +576,34 @@ final class AuditModel: ObservableObject {
             return
         }
         do {
+            // Consume the verify primitive's structured VerificationResult —
+            // no string-matching. stderr is kept separate so benign chatter can
+            // never corrupt the verdict; the verdict lives in the `ok` field.
             let output = try await runPython([
-                "-m", "invoice_audit", "verify", receiptURL.path
-            ])
-            verification = output.localizedCaseInsensitiveContains("VERIFIED")
-                ? "Verified"
-                : "Needs attention"
-            transcript += output
+                "-m", "invoice_audit", "verify", receiptURL.path, "--json"
+            ], mergeStderr: false)
+            var detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let data = output.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let ok = obj["ok"] as? Bool {
+                verification = ok ? "Verified" : "Needs attention"
+                let problems = (obj["problems"] as? [String]) ?? []
+                // Narration + the substrate it's read from (Law 2: show the record).
+                detail = (ok
+                    ? "VERIFIED [\(obj["rule_version"] as? String ?? "")]"
+                    : "NEEDS ATTENTION — \(problems.joined(separator: "; "))")
+                    + "\n" + output.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                // Unparseable output is inconclusive — never a manufactured
+                // verdict. Fail closed to a non-verdict state.
+                verification = "Unavailable"
+                detail = "Verification unavailable — result could not be read."
+            }
+            transcript += detail
             logActivity(
                 kind: "verification",
                 title: "Verified receipt",
-                detail: output.trimmingCharacters(in: .whitespacesAndNewlines),
+                detail: detail,
                 outcome: verification
             )
         } catch {
@@ -986,7 +1003,10 @@ final class AuditModel: ObservableObject {
         }
     }
 
-    func runPython(_ args: [String]) async throws -> String {
+    /// Run the bundled python engine. `mergeStderr: false` keeps stderr OUT of
+    /// the returned stdout so a consumer can parse a clean structured result —
+    /// benign stderr chatter must never corrupt a machine-read verdict.
+    func runPython(_ args: [String], mergeStderr: Bool = true) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.currentDirectoryURL = self.repoRoot
@@ -1002,18 +1022,24 @@ final class AuditModel: ObservableObject {
             env["PATH"] = (extraPath + [currentPath]).joined(separator: ":")
             process.environment = env
 
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
+            let outPipe = Pipe()
+            process.standardOutput = outPipe
+            let errPipe: Pipe? = mergeStderr ? nil : Pipe()
+            process.standardError = mergeStderr ? outPipe : errPipe!
             try process.run()
+
+            // Read before waiting to avoid a full-pipe deadlock on large output.
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe?.fileHandleForReading.readDataToEndOfFile() ?? Data()
             process.waitUntilExit()
 
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let text = String(data: data, encoding: .utf8) ?? ""
+            let out = String(data: outData, encoding: .utf8) ?? ""
+            let err = String(data: errData, encoding: .utf8) ?? ""
             if process.terminationStatus != 0 {
-                throw AppError(text.isEmpty ? "Python exited with \(process.terminationStatus)" : text)
+                let msg = mergeStderr ? out : (err.isEmpty ? out : err)
+                throw AppError(msg.isEmpty ? "Python exited with \(process.terminationStatus)" : msg)
             }
-            return text
+            return out
         }.value
     }
 }

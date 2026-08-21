@@ -38,7 +38,7 @@ from .connectors import (
 from .kist_bridge import KIST_MODES, KistResearchError, kist_available
 from .legacy_bridge import bridge_status, legacy_status_text
 from .ocr import AuditError
-from .receipt import verify_receipt
+from . import primitives
 from .savings import savings_report, savings_text
 from .store import connect, list_findings, store_receipt
 from .watcher import run_once_if_changed, watch_loop
@@ -170,6 +170,9 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("receipt", type=Path)
     v.add_argument("--no-rehash", action="store_true",
                    help="check signature only (inputs not present here)")
+    v.add_argument("--json", action="store_true",
+                   help="emit the structured VerificationResult (exit 0 when the "
+                        "result is produced; the verdict is the `ok` field, not the exit code)")
 
     br = sub.add_parser("benchmark-refresh",
                         help="research industry market prices via kist into a cache")
@@ -385,14 +388,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "verify":
             receipt = json.loads(args.receipt.read_text())
-            problems = verify_receipt(receipt,
-                                      rehash_inputs=not args.no_rehash)
-            if problems:
-                for p in problems:
+            # One path to verification: the primitive. No direct call, no
+            # bespoke re-check here — CLI and Swift both consume this result.
+            result = primitives.verify(receipt, rehash_inputs=not args.no_rehash)
+            if args.json:
+                # The verdict lives in the JSON `ok` field. Exit 0 whenever a
+                # result was produced so a structured consumer (Swift) can read
+                # `ok`/`problems` instead of a non-zero exit collapsing a real
+                # "needs attention" into a generic process failure.
+                print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+                return 0
+            if not result.ok:
+                for p in result.problems:
                     print(f"FAIL {p}", file=sys.stderr)
                 return 1
             print("VERIFIED — signature valid"
-                  + ("" if args.no_rehash else ", input hashes match"))
+                  + ("" if args.no_rehash else ", input hashes match")
+                  + f" [{result.rule_version}]")
             return 0
         if args.cmd == "benchmark-refresh":
             receipt = json.loads(args.receipt.read_text())

@@ -44,6 +44,26 @@ The money path is deterministic and symbolic, end to end.
 
 ---
 
+## The stability invariant
+
+> **Same grounded inputs + same rules = same authoritative result.**
+
+Run the money path twice on the same source data and the same rule versions and
+it returns the identical authoritative value — every round, no drift. If the
+result *does* change, the **trace must show exactly what changed**, and it can
+only be one of four things:
+
+1. a **human override** (who, when),
+2. the **source data** (which rows, new timestamps),
+3. the **rule version** (which taught rule / floor changed, and its evidence),
+4. an **approved statistical / evidence update** (probabilistic math crossed its
+   threshold — never an LLM's opinion).
+
+If a money result changes and the trace cannot name which of these four caused
+it, that is a corruption, not an update. Reject it.
+
+---
+
 ## Law 2 — The REPL is the operator surface, never the authority
 
 The rule from Law 1 applies **twice** — at computation *and* at narration. An
@@ -107,6 +127,27 @@ Exposing the REPL is where it starts to feel like kist instead of an app.
 
 ---
 
+## Enforcement
+
+This file is a **contract**, not documentation. It is meant to be checked
+against, continuously, by humans and by the synthetic review team. A reviewer —
+Codex, DeepSeek, verify-eng, or a human — should be able to be asked, of any
+diff:
+
+> **Does this diff violate `FINANCIAL_DOCTRINE.md`? Show evidence.**
+
+and answer from the specific lines above. A "no evidence" answer is not a pass;
+it is an incomplete review. The doctrine is only real if the team tests itself
+against it every round.
+
+---
+
 *Repetition audit, 2026-08-21 — earned promotion: `verify`, `trace`;
 deterministic-core promotion: `compare`, `search`. Held (still moving or not yet
 a concept): `benchmark`, `savings`, `explain`, `export`.*
+
+*Honest note on `verify`: promoted as the registry TEMPLATE with two live
+consumers (CLI + Swift) sharing one contract, plus the REPL to come — the
+"≥3 ways" bar is counted as consumers/narrations, not three independent
+re-derivations. Stable behavior (one deterministic core, many surfaces) is what
+earned it.*

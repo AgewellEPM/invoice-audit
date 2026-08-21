@@ -85,6 +85,21 @@ def sign_receipt(body: dict) -> dict:
     return {**body, "publicKey": pub.hex(), "signature": signature.hex()}
 
 
+def _recheck_file(obj, kind: str, problems: list) -> None:
+    """Re-hash one referenced input, fail-closed with a NAMED reason. Tolerates a
+    malformed (path-less / non-dict) entry — a verification must never crash into
+    an unnamed traceback on a signed-but-malformed body; it emits a reason code."""
+    path = obj.get("path") if isinstance(obj, dict) else None
+    if not path:
+        problems.append(f"{kind}-malformed-no-path")
+        return
+    p = Path(path)
+    if not p.exists():
+        problems.append(f"{kind}-absent:{p.name}")
+    elif sha256_file(p) != (obj.get("sha256") if isinstance(obj, dict) else None):
+        problems.append(f"{kind}-hash-changed:{p.name}")
+
+
 def verify_receipt(receipt: dict, rehash_inputs: bool = True) -> list[str]:
     """Return list of named problems; empty list == verified."""
     problems: list[str] = []
@@ -97,11 +112,8 @@ def verify_receipt(receipt: dict, rehash_inputs: bool = True) -> list[str]:
         problems.append("receipt-signature-invalid")
     if rehash_inputs:
         for scan in receipt.get("scans", []):
-            p = Path(scan["path"])
-            if not p.exists():
-                problems.append(f"scan-absent:{p.name}")
-            elif sha256_file(p) != scan["sha256"]:
-                problems.append(f"scan-hash-changed:{p.name}")
+            scan = scan if isinstance(scan, dict) else {}
+            _recheck_file(scan, "scan", problems)
             source_path = scan.get("source_path")
             source_sha256 = scan.get("source_sha256")
             if source_path and source_sha256:
@@ -110,32 +122,12 @@ def verify_receipt(receipt: dict, rehash_inputs: bool = True) -> list[str]:
                     problems.append(f"source-absent:{sp.name}")
                 elif sha256_file(sp) != source_sha256:
                     problems.append(f"source-hash-changed:{sp.name}")
-        pb = receipt.get("pricebook", {})
-        if pb:
-            p = Path(pb["path"])
-            if not p.exists():
-                problems.append(f"pricebook-absent:{p.name}")
-            elif sha256_file(p) != pb["sha256"]:
-                problems.append(f"pricebook-hash-changed:{p.name}")
-        mp = receipt.get("marketPricebook", {})
-        if mp:
-            p = Path(mp["path"])
-            if not p.exists():
-                problems.append(f"market-pricebook-absent:{p.name}")
-            elif sha256_file(p) != mp["sha256"]:
-                problems.append(f"market-pricebook-hash-changed:{p.name}")
-        mb = receipt.get("marketBenchmarks", {})
-        if mb:
-            p = Path(mb["path"])
-            if not p.exists():
-                problems.append(f"market-benchmarks-absent:{p.name}")
-            elif sha256_file(p) != mb["sha256"]:
-                problems.append(f"market-benchmarks-hash-changed:{p.name}")
-        fr = receipt.get("floorRules")
-        if fr:
-            p = Path(fr["path"])
-            if not p.exists():
-                problems.append(f"floor-rules-absent:{p.name}")
-            elif sha256_file(p) != fr["sha256"]:
-                problems.append(f"floor-rules-hash-changed:{p.name}")
+        if receipt.get("pricebook"):
+            _recheck_file(receipt["pricebook"], "pricebook", problems)
+        if receipt.get("marketPricebook"):
+            _recheck_file(receipt["marketPricebook"], "market-pricebook", problems)
+        if receipt.get("marketBenchmarks"):
+            _recheck_file(receipt["marketBenchmarks"], "market-benchmarks", problems)
+        if receipt.get("floorRules"):
+            _recheck_file(receipt["floorRules"], "floor-rules", problems)
     return problems

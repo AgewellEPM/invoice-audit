@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import base64
 import os
+import shutil
 import subprocess
 import sqlite3
 import sys
@@ -46,6 +47,9 @@ from invoice_audit.benchmark import (  # noqa: E402
     items_from_receipt, refresh_all, refresh_item)
 from invoice_audit.savings import savings_report, savings_text  # noqa: E402
 from invoice_audit.pricebook import PriceBook  # noqa: E402
+from invoice_audit.primitives import (  # noqa: E402
+    Permission, REGISTRY, VerificationResult,
+    primitives as list_primitives, verify as verify_primitive)
 from contextlib import contextmanager  # noqa: E402
 
 
@@ -1251,6 +1255,174 @@ def test_receipt_binds_and_verifies_market_benchmarks_sidecar():
         assert "market-pricebook-hash-changed:market-pricebook.csv" in verify_receipt(receipt)
         Path(bench.sidecar).write_text(Path(bench.sidecar).read_text() + " ")
         assert "market-benchmarks-hash-changed:market-benchmarks.json" in verify_receipt(receipt)
+
+
+# ---------------------------------------------------------------------------
+# Primitive registry — `verify` is the template contract every surface consumes.
+# ---------------------------------------------------------------------------
+
+def test_verify_primitive_returns_full_contract_shape():
+    r = sign_receipt({"schema": SCHEMA, "scans": [], "pricebook": {}, "n": 1})
+    res = verify_primitive(r, rehash_inputs=False)
+    assert isinstance(res, VerificationResult)
+    # The fixed categories are ALWAYS present.
+    assert res.ok is True
+    assert res.problems == []
+    assert res.provenance["signatureChecked"] is True
+    # rehash OFF → nothing was re-hashed → provenance claims nothing was.
+    assert res.provenance["rehashedInputs"] is False
+    assert res.provenance["reHashed"] == {}
+    assert res.rule_version == "invoice-audit.verify.v1"
+    assert res.timestamp.endswith("Z")
+    # The authoritative result matches the deterministic core EXACTLY — the
+    # primitive standardizes reporting, it never changes the verdict.
+    assert res.ok == (verify_receipt(r, rehash_inputs=False) == [])
+
+
+def test_verify_primitive_never_raises_on_hostile_shapes():
+    # A signed receipt the CORE verifies (rehash off) must never crash the
+    # provenance builder — the wrapper is at least as robust as what it wraps.
+    r = sign_receipt({"schema": SCHEMA, "scans": ["a.png"], "pricebook": "notadict"})
+    core = verify_receipt(r, rehash_inputs=False)
+    res = verify_primitive(r, rehash_inputs=False)      # must NOT raise
+    assert isinstance(res, VerificationResult)
+    assert res.ok == (core == [])
+    assert res.problems == core
+
+
+def test_verify_primitive_rehash_parity_and_honest_provenance():
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        scans = Path(d) / "scans"
+        shutil.copytree(DEMO / "scans", scans)
+        receipt = audit_folder(scans, DEMO / "pricebook.csv")
+        res = verify_primitive(receipt, rehash_inputs=True)
+        assert res.ok is True
+        # Provenance reflects what was ACTUALLY re-hashed, keyed by the real path.
+        assert res.provenance["reHashed"]["scans"] == [s["path"] for s in receipt["scans"]]
+        assert res.provenance["reHashed"]["pricebook"] == receipt["pricebook"]["path"]
+        # Tamper a scan on disk → core reports hash-changed; primitive matches.
+        Path(receipt["scans"][0]["path"]).write_bytes(b"corrupt")
+        core = verify_receipt(receipt, rehash_inputs=True)
+        tampered = verify_primitive(receipt, rehash_inputs=True)
+        assert tampered.ok is False
+        assert any("hash-changed" in p for p in tampered.problems)
+        assert tampered.problems == core               # never diverges from core
+
+
+def test_verify_primitive_unsigned_parity():
+    r = {"schema": SCHEMA, "scans": [], "pricebook": {}}  # no signature at all
+    res = verify_primitive(r, rehash_inputs=False)
+    assert res.ok is False
+    assert "receipt-unsigned" in res.problems
+    assert res.problems == verify_receipt(r, rehash_inputs=False)
+
+
+def test_verify_cli_json_exits_zero_on_tamper_and_carries_problems():
+    # Cross the CLI-exit -> consumer seam: --json must exit 0 and put the verdict
+    # in `ok`, so a real tamper surfaces as structured problems, not a process
+    # failure that a consumer (Swift) would misclassify as "Failed".
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        receipt = audit_folder(DEMO / "scans", DEMO / "pricebook.csv")
+        receipt["totals"]["flagged"] = 999            # tamper the signed body
+        rpath = Path(d) / "tampered.json"
+        rpath.write_text(json.dumps(receipt))
+        proc = subprocess.run(
+            [sys.executable, "-m", "invoice_audit", "verify", str(rpath), "--json"],
+            cwd=str(ROOT), env={**os.environ, "PYTHONPATH": str(ROOT)},
+            capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr       # exit 0 even when not ok
+        out = json.loads(proc.stdout)
+        assert out["ok"] is False
+        assert "receipt-signature-invalid" in out["problems"]
+
+
+def test_verify_primitive_flags_tamper_matching_core():
+    r = sign_receipt({"schema": SCHEMA, "scans": [], "pricebook": {}, "n": 1})
+    r["n"] = 2  # tamper the body after signing
+    res = verify_primitive(r, rehash_inputs=False)
+    assert res.ok is False
+    assert "receipt-signature-invalid" in res.problems
+    # Primitive never diverges from the deterministic op it wraps.
+    assert res.problems == verify_receipt(r, rehash_inputs=False)
+
+
+def test_verify_primitive_registered_as_read_only_tool():
+    p = REGISTRY["verify"]
+    assert p.permission == Permission.READ           # safe for read-only sessions
+    assert p.input_schema and p.output_schema        # minimal contract present
+    assert set(p.output_schema) == {
+        "ok", "problems", "provenance", "rule_version", "timestamp"}
+    assert "verify" in list_primitives(Permission.READ)
+
+
+def test_verify_primitive_total_on_signed_malformed_path():
+    # A SIGNED receipt whose scan entry lacks 'path' must NOT raise — the core
+    # emits a named reason and the primitive returns the full contract shape.
+    r = sign_receipt({"schema": SCHEMA, "scans": [{"sha256": "deadbeef"}], "pricebook": {}})
+    res = verify_primitive(r, rehash_inputs=True)          # must not raise
+    assert isinstance(res, VerificationResult)
+    assert res.ok is False
+    assert "scan-malformed-no-path" in res.problems
+    assert res.problems == verify_receipt(r, rehash_inputs=True)
+
+
+def test_verify_primitive_provenance_honest_on_failure_paths():
+    # Unsigned → no signature check ran → signatureChecked False (no theater).
+    unsigned = {"schema": SCHEMA, "scans": [], "pricebook": {}}
+    pv = verify_primitive(unsigned, rehash_inputs=True).provenance
+    assert pv["signatureChecked"] is False
+    # Signed but referenced files absent → they were NEVER hashed, so provenance
+    # must not list them.
+    r = sign_receipt({
+        "schema": SCHEMA,
+        "scans": [{"path": "/no/such/scan.png", "sha256": "x", "file": "scan.png"}],
+        "pricebook": {"path": "/no/such/pb.csv", "sha256": "y"},
+    })
+    res = verify_primitive(r, rehash_inputs=True)
+    assert res.ok is False
+    assert any("absent" in p for p in res.problems)
+    assert res.provenance["signatureChecked"] is True      # a real signature WAS checked
+    assert res.provenance["reHashed"]["scans"] == []        # absent → not hashed → not claimed
+    assert res.provenance["reHashed"]["pricebook"] is None
+
+
+def test_verify_primitive_provenance_pins_every_rehashed_surface():
+    # Multi-site discipline: assert ALL six hashed-input provenance surfaces by
+    # name, against a receipt that configures every one of them.
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d, _kist_fixture({
+        "HYD-4410|HYDRAULIC PUMP ASSY": _PUMP,
+        "FLT-2200|FORKLIFT BRAKE KIT": {"unit_price_usd": 400.0},
+        "SEN-7781|PROXIMITY SENSOR HD": {"unit_price_usd": 60.0},
+    }):
+        scans = Path(d) / "scans"
+        shutil.copytree(DEMO / "scans", scans)
+        base = audit_folder(scans, DEMO / "pricebook.csv")
+        bench = refresh_all(items_from_receipt(base), Path(d) / "bench", mode="dig")
+        receipt = audit_folder(scans, DEMO / "pricebook.csv",
+                               floor_path=DEMO / "floor-rules.json",
+                               market_path=bench.market_csv,
+                               market_benchmarks_path=bench.sidecar)
+        rh = verify_primitive(receipt, rehash_inputs=True).provenance["reHashed"]
+        assert rh["scans"] == [s["path"] for s in receipt["scans"]]
+        assert rh["sources"] == [s["source_path"] for s in receipt["scans"]]
+        assert rh["pricebook"] == receipt["pricebook"]["path"]
+        assert rh["marketPricebook"] == receipt["marketPricebook"]["path"]
+        assert rh["marketBenchmarks"] == receipt["marketBenchmarks"]["path"]
+        assert rh["floorRules"] == receipt["floorRules"]["path"]
+
+
+def test_verify_result_authoritative_part_stable_across_runs():
+    # Stability invariant: same inputs + same rules => identical authoritative
+    # result; only the timestamp (metadata) may drift.
+    r = sign_receipt({"schema": SCHEMA, "scans": [], "pricebook": {}, "n": 7})
+    a = verify_primitive(r, rehash_inputs=False).to_dict()
+    b = verify_primitive(r, rehash_inputs=False).to_dict()
+    del a["timestamp"]
+    del b["timestamp"]
+    assert a == b
 
 
 if __name__ == "__main__":
