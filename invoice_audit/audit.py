@@ -27,7 +27,8 @@ from .categories import classify_invoice, classify_item
 def audit_folder(scans_dir: Path, pricebook_path: Path,
                  tolerance: float = 0.15,
                  floor_path: Path | None = None,
-                 market_path: Path | None = None) -> dict:
+                 market_path: Path | None = None,
+                 market_benchmarks_path: Path | None = None) -> dict:
     scans = collect_scan_inputs(scans_dir)
 
     book = PriceBook.load(pricebook_path)
@@ -197,6 +198,11 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
         body["marketPricebook"] = {"path": str(market_path),
                                    "sha256": market_book.source_sha256,
                                    "rows": len(market_book.rows)}
+    # Bind the kist research provenance (the sidecar) into the signed receipt so
+    # the industry benchmark is auditable and re-verifiable, not just a CSV.
+    if market_benchmarks_path is not None and Path(market_benchmarks_path).exists():
+        body["marketBenchmarks"] = {"path": str(market_benchmarks_path),
+                                    "sha256": sha256_file(Path(market_benchmarks_path))}
     return sign_receipt(body)
 
 

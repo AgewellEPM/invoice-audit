@@ -40,6 +40,35 @@ from invoice_audit.legacy_bridge import summarize_processes  # noqa: E402
 from invoice_audit.ocr import AuditError, Token  # noqa: E402
 from invoice_audit.pricebook import PriceBook, ReferenceRow  # noqa: E402
 from invoice_audit.receipt import sign_receipt, verify_receipt, SCHEMA  # noqa: E402
+from invoice_audit.kist_bridge import (  # noqa: E402
+    KistResearchError, MarketQuote, research_price, _extract_json)
+from invoice_audit.benchmark import (  # noqa: E402
+    items_from_receipt, refresh_all, refresh_item)
+from invoice_audit.savings import savings_report, savings_text  # noqa: E402
+from invoice_audit.pricebook import PriceBook  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+
+
+@contextmanager
+def _kist_fixture(mapping: dict):
+    """Point kist_bridge at an in-test fixture map (offline, deterministic)."""
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "kfix.json"
+        p.write_text(json.dumps(mapping))
+        old = os.environ.get("INVOICE_AUDIT_KIST_FIXTURE")
+        os.environ["INVOICE_AUDIT_KIST_FIXTURE"] = str(p)
+        try:
+            yield
+        finally:
+            if old is None:
+                os.environ.pop("INVOICE_AUDIT_KIST_FIXTURE", None)
+            else:
+                os.environ["INVOICE_AUDIT_KIST_FIXTURE"] = old
+
+
+_PUMP = {"unit_price_usd": 3200.0, "low_usd": 2900, "high_usd": 3600,
+         "confidence": 0.72, "models": ["opus", "gemini", "deepseek"],
+         "sources": ["https://example.com/pumps"], "notes": "median of 3"}
 from invoice_audit.store import connect, count_rows, list_findings, store_receipt  # noqa: E402
 from invoice_audit.validate import arithmetic_flags  # noqa: E402
 from invoice_audit.watcher import run_once_if_changed, source_fingerprint  # noqa: E402
@@ -1032,6 +1061,175 @@ def test_receipt_pure_signature_verifies_through_receipt_verifier():
     # and a tampered body must fail
     bad = R._canonical({**body, "n": 43})
     assert R._verify_sig(pub, bad, sig) is False
+
+
+# ---------------------------------------------------------------------------
+# Industry benchmark (kist research) + savings story — per-site invariants.
+# ---------------------------------------------------------------------------
+
+def test_kist_bridge_fixture_parses_cross_model_quote():
+    with _kist_fixture({"HYD-4410|HYDRAULIC PUMP ASSY": _PUMP}):
+        q = research_price("HYD-4410", "HYDRAULIC PUMP ASSY", mode="dig")
+    assert isinstance(q, MarketQuote)
+    assert q.unit_price_usd == 3200.0
+    assert q.low_usd == 2900.0 and q.high_usd == 3600.0
+    assert q.models_consulted == ["opus", "gemini", "deepseek"]
+    assert q.provenance == "fixture"  # honest: never dressed up as live
+
+
+def test_kist_bridge_fails_closed_with_named_reason_per_case():
+    # Each failure mode returns a DISTINCT machine-readable reason — never a price.
+    cases = {
+        "kist-fixture-no-entry": ("NOPE", "does not exist", {"X|Y": _PUMP}),
+        "kist-missing-price": ("A", "b", {"A|b": {"unit_price_usd": None}}),
+        "kist-nonpositive-price": ("A", "b", {"A|b": {"unit_price_usd": 0}}),
+        "kist-bad-price": ("A", "b", {"A|b": {"unit_price_usd": "free"}}),
+    }
+    for expected_reason, (sku, desc, mapping) in cases.items():
+        with _kist_fixture(mapping):
+            try:
+                research_price(sku, desc)
+                assert False, f"{expected_reason} should have raised"
+            except KistResearchError as e:
+                assert e.reason == expected_reason, (expected_reason, e.reason)
+
+
+def test_kist_bridge_binary_absent_fails_closed():
+    old = os.environ.get("INVOICE_AUDIT_KIST_BIN")
+    os.environ["INVOICE_AUDIT_KIST_BIN"] = "kist-does-not-exist-xyz"
+    os.environ.pop("INVOICE_AUDIT_KIST_FIXTURE", None)
+    try:
+        research_price("A", "b")
+        assert False, "absent binary should fail closed"
+    except KistResearchError as e:
+        assert e.reason == "kist-binary-not-found"
+    finally:
+        if old is None:
+            os.environ.pop("INVOICE_AUDIT_KIST_BIN", None)
+        else:
+            os.environ["INVOICE_AUDIT_KIST_BIN"] = old
+
+
+def test_kist_bridge_extracts_last_json_block_and_flags_no_json():
+    stream = ('model A says ```json\n{"unit_price_usd": 10}\n```\n'
+              'synthesis ```json\n{"unit_price_usd": 42}\n```\n')
+    assert _extract_json(stream)["unit_price_usd"] == 42  # last block wins
+    try:
+        _extract_json("no json here at all")
+        assert False, "should raise kist-no-json"
+    except KistResearchError as e:
+        assert e.reason == "kist-no-json"
+
+
+def test_benchmark_refresh_writes_pricebook_shape_and_fails_closed_per_item():
+    with tempfile.TemporaryDirectory() as d, _kist_fixture({"HYD-4410|HYDRAULIC PUMP ASSY": _PUMP}):
+        items = [("HYD-4410", "HYDRAULIC PUMP ASSY"), ("FLT-2200", "FORKLIFT BRAKE KIT")]
+        r = refresh_all(items, d, mode="dig")
+        assert r.researched == 1 and len(r.quotes) == 1
+        # The un-researchable item is LEFT OUT and named — never invented.
+        assert any(f["sku"] == "FLT-2200" and f["reason"] == "kist-fixture-no-entry"
+                   for f in r.failures)
+        # CSV is PriceBook-compatible and loads.
+        book = PriceBook.load(Path(d) / "market-pricebook.csv")
+        assert len(book.rows) == 1
+        # Sidecar carries provenance for the receipt.
+        side = json.loads((Path(d) / "market-benchmarks.json").read_text())
+        assert side["count"] == 1
+        assert side["benchmarks"][0]["provenance"] == "fixture"
+
+
+def test_benchmark_cache_reuses_fresh_then_force_reresearches():
+    with tempfile.TemporaryDirectory() as d, _kist_fixture({"HYD-4410|HYDRAULIC PUMP ASSY": _PUMP}):
+        items = [("HYD-4410", "HYDRAULIC PUMP ASSY")]
+        first = refresh_all(items, d, mode="dig")
+        assert first.researched == 1 and first.reused == 0
+        second = refresh_all(items, d, mode="dig")          # cache hit
+        assert second.researched == 0 and second.reused == 1
+        forced = refresh_all(items, d, mode="dig", force=True)  # ignore cache
+        assert forced.researched == 1 and forced.reused == 0
+
+
+def test_benchmark_refresh_item_forces_fresh_live_quote():
+    with tempfile.TemporaryDirectory() as d, _kist_fixture({"HYD-4410|HYDRAULIC PUMP ASSY": _PUMP}):
+        q = refresh_item("HYD-4410", "HYDRAULIC PUMP ASSY", d, mode="dig")
+        assert q.unit_price_usd == 3200.0
+        assert (Path(d) / "market-pricebook.csv").exists()
+
+
+def test_benchmark_items_from_receipt_are_distinct():
+    receipt = {"invoices": [
+        {"lines": [{"sku": "A", "description": "x"}, {"sku": "A", "description": "x"}]},
+        {"lines": [{"sku": "B", "description": "y"}, {"sku": "", "description": ""}]},
+    ]}
+    assert items_from_receipt(receipt) == [("A", "x"), ("B", "y")]
+
+
+def _savings_fixture_receipt() -> dict:
+    return {
+        "totals": {"invoices": 3, "linesChecked": 7, "flagged": 4,
+                   "potentialOverchargeUSD": 6060.0, "marketOverchargeUSD": 2780.0,
+                   "policyOverageUSD": 120.0, "dataQualityIssues": 1},
+        "reviewQueue": [
+            {"invoice": "i1", "kind": "overcharge-flag", "line": 0, "detail": "hist"},
+            {"invoice": "i1", "kind": "market-overcharge-flag", "line": 0, "detail": "mkt"},
+            {"invoice": "i2", "kind": "no-reference", "line": 1, "detail": "no hist"},
+            {"invoice": "i3", "kind": "market-no-reference", "line": 0, "detail": "no mkt"},
+        ],
+    }
+
+
+def test_savings_report_sums_money_caught_per_source():
+    r = savings_report(_savings_fixture_receipt())
+    # Money caught = history + industry benchmark + policy, each pinned by name.
+    assert r["breakdown"]["priceHistoryUSD"] == 6060.0
+    assert r["breakdown"]["industryBenchmarkUSD"] == 2780.0
+    assert r["breakdown"]["policyUSD"] == 120.0
+    # Honest: max(history, industry) + policy — never the double-counting sum.
+    assert r["moneyCaughtUSD"] == 6180.0
+    assert r["moneyCaughtUSD"] < 6060.0 + 2780.0 + 120.0  # provably not summed
+    assert r["flagsFound"] == 4
+    # "Things you'd have missed" surfaced per source.
+    assert r["itemsSurfaced"]["noPriceHistory"] == 1
+    assert r["itemsSurfaced"]["noIndustryBenchmark"] == 1
+    assert r["itemsSurfaced"]["dataQuality"] == 1
+    assert "industry" in r["headline"].lower()
+    assert "6,180" in savings_text(_savings_fixture_receipt())
+
+
+def test_savings_clean_receipt_has_zero_caught_and_clean_headline():
+    clean = {"totals": {"invoices": 2, "linesChecked": 4, "flagged": 0},
+             "reviewQueue": []}
+    r = savings_report(clean)
+    assert r["moneyCaughtUSD"] == 0.0
+    assert "clean" in r["headline"].lower()
+
+
+def test_receipt_binds_and_verifies_market_benchmarks_sidecar():
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d, _kist_fixture({
+        "HYD-4410|HYDRAULIC PUMP ASSY": _PUMP,
+        "FLT-2200|FORKLIFT BRAKE KIT": {"unit_price_usd": 400.0},
+        "SEN-7781|PROXIMITY SENSOR HD": {"unit_price_usd": 60.0},
+    }):
+        # kist research → market CSV + provenance sidecar.
+        items = [("HYD-4410", "HYDRAULIC PUMP ASSY"),
+                 ("FLT-2200", "FORKLIFT BRAKE KIT"),
+                 ("SEN-7781", "PROXIMITY SENSOR HD")]
+        bench = refresh_all(items, d, mode="dig")
+        receipt = audit_folder(
+            DEMO / "scans", DEMO / "pricebook.csv",
+            floor_path=DEMO / "floor-rules.json",
+            market_path=bench.market_csv,
+            market_benchmarks_path=bench.sidecar,
+        )
+        # Provenance is bound into the signed receipt and verifies.
+        assert "marketBenchmarks" in receipt
+        assert verify_receipt(receipt, rehash_inputs=True) == []
+        # Per-site tamper detection: BOTH the market CSV and the sidecar are pinned.
+        Path(bench.market_csv).write_text(Path(bench.market_csv).read_text() + "Z,z,1.00\n")
+        assert "market-pricebook-hash-changed:market-pricebook.csv" in verify_receipt(receipt)
+        Path(bench.sidecar).write_text(Path(bench.sidecar).read_text() + " ")
+        assert "market-benchmarks-hash-changed:market-benchmarks.json" in verify_receipt(receipt)
 
 
 if __name__ == "__main__":

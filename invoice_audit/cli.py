@@ -32,11 +32,14 @@ from .analytics import (
     write_html_report, write_integration_payload, write_slack_payload)
 from .analyst import answer_question
 from .audit import audit_folder
+from .benchmark import items_from_receipt, refresh_all, refresh_item
 from .connectors import (
     ConnectorConfig, connector_presets, sync_connector, write_connector_config)
+from .kist_bridge import KIST_MODES, KistResearchError, kist_available
 from .legacy_bridge import bridge_status, legacy_status_text
 from .ocr import AuditError
 from .receipt import verify_receipt
+from .savings import savings_report, savings_text
 from .store import connect, list_findings, store_receipt
 from .watcher import run_once_if_changed, watch_loop
 
@@ -50,6 +53,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--pricebook", type=Path, required=True)
     a.add_argument("--market", type=Path, default=None,
                    help="optional market benchmark CSV/SQLite")
+    a.add_argument("--market-benchmarks", type=Path, default=None,
+                   help="optional kist research provenance sidecar (JSON) to bind into the receipt")
     a.add_argument("--floor", type=Path, default=None,
                    help="taught vendor/domain rules (JSON) — symbolic veto layer")
     a.add_argument("--tolerance", type=float, default=0.15)
@@ -60,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     adb.add_argument("--pricebook", type=Path, required=True)
     adb.add_argument("--market", type=Path, default=None,
                      help="optional market benchmark CSV/SQLite")
+    adb.add_argument("--market-benchmarks", type=Path, default=None,
+                     help="optional kist research provenance sidecar (JSON)")
     adb.add_argument("--floor", type=Path, default=None,
                      help="taught vendor/domain rules (JSON)")
     adb.add_argument("--tolerance", type=float, default=0.15)
@@ -164,13 +171,39 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--no-rehash", action="store_true",
                    help="check signature only (inputs not present here)")
 
+    br = sub.add_parser("benchmark-refresh",
+                        help="research industry market prices via kist into a cache")
+    br.add_argument("--receipt", type=Path, required=True,
+                    help="signed receipt whose items to benchmark")
+    br.add_argument("--cache-dir", type=Path, required=True)
+    br.add_argument("--region", default="United States")
+    br.add_argument("--mode", default="dig", choices=KIST_MODES,
+                    help="kist research mode (dig = every model cross-compared)")
+    br.add_argument("--force", action="store_true",
+                    help="ignore cache freshness and re-research every item")
+    br.add_argument("--max-age-days", type=int, default=30)
+    br.add_argument("--json", action="store_true")
+
+    bi = sub.add_parser("benchmark-item",
+                        help="force a fresh live kist dig for ONE item")
+    bi.add_argument("--sku", default="")
+    bi.add_argument("--description", default="")
+    bi.add_argument("--cache-dir", type=Path, required=True)
+    bi.add_argument("--region", default="United States")
+    bi.add_argument("--mode", default="dig", choices=KIST_MODES)
+
+    sv = sub.add_parser("savings", help="show the savings/value story from a receipt")
+    sv.add_argument("receipt", type=Path)
+    sv.add_argument("--json", action="store_true")
+
     args = ap.parse_args(argv)
     try:
         if args.cmd == "audit":
             receipt = audit_folder(args.scans_dir, args.pricebook,
                                    tolerance=args.tolerance,
                                    floor_path=args.floor,
-                                   market_path=args.market)
+                                   market_path=args.market,
+                                   market_benchmarks_path=args.market_benchmarks)
             out = args.out or (args.scans_dir / "audit-receipt.json")
             out.write_text(json.dumps(receipt, indent=2, sort_keys=True))
             t = receipt["totals"]
@@ -187,7 +220,8 @@ def main(argv: list[str] | None = None) -> int:
             receipt = audit_folder(args.scans_dir, args.pricebook,
                                    tolerance=args.tolerance,
                                    floor_path=args.floor,
-                                   market_path=args.market)
+                                   market_path=args.market,
+                                   market_benchmarks_path=args.market_benchmarks)
             if args.out:
                 args.out.write_text(json.dumps(receipt, indent=2, sort_keys=True))
             with connect(args.db) as con:
@@ -359,6 +393,46 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print("VERIFIED — signature valid"
                   + ("" if args.no_rehash else ", input hashes match"))
+            return 0
+        if args.cmd == "benchmark-refresh":
+            receipt = json.loads(args.receipt.read_text())
+            items = items_from_receipt(receipt)
+            result = refresh_all(items, args.cache_dir, region=args.region,
+                                 mode=args.mode, force=args.force,
+                                 max_age_days=args.max_age_days)
+            payload = result.to_dict()
+            payload["kistAvailable"] = kist_available()
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(f"researched={result.researched} reused={result.reused} "
+                      f"priced={len(result.quotes)} failures={len(result.failures)}")
+                print(f"marketCsv={result.market_csv}")
+                print(f"sidecar={result.sidecar}")
+                for f in result.failures:
+                    print(f"  UNPRICED [{f['reason']}] {f['sku']} {f['description']}")
+            return 0
+        if args.cmd == "benchmark-item":
+            if not args.sku and not args.description:
+                print("invoice-audit: benchmark-item needs --sku or --description",
+                      file=sys.stderr)
+                return 2
+            try:
+                quote = refresh_item(args.sku, args.description, args.cache_dir,
+                                     region=args.region, mode=args.mode)
+            except KistResearchError as e:
+                print(json.dumps({"ok": False, "reason": e.reason,
+                                  "detail": e.detail}))
+                return 1
+            print(json.dumps({"ok": True, **quote.to_dict()},
+                             indent=2, sort_keys=True))
+            return 0
+        if args.cmd == "savings":
+            receipt = json.loads(args.receipt.read_text())
+            if args.json:
+                print(json.dumps(savings_report(receipt), indent=2, sort_keys=True))
+            else:
+                print(savings_text(receipt))
             return 0
     except AuditError as e:
         print(f"invoice-audit: {e}", file=sys.stderr)
