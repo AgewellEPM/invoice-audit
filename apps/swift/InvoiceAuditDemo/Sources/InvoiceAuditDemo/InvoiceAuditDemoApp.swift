@@ -2318,116 +2318,208 @@ struct MoneyLineagePanel: View {
 struct FinanceDailyJournalPanel: View {
     @EnvironmentObject private var model: AuditModel
     @State private var selectedDay = Date()
+    @State private var visibleMonth = Date()
     @State private var noteText = ""
-
-    private let daysToShow = 10
 
     var body: some View {
         DarkPanel {
-            HStack(alignment: .top, spacing: 18) {
-                VStack(alignment: .leading, spacing: 12) {
-                    SectionHeader(title: "Finance journal calendar", systemImage: "calendar")
-                    ForEach(recentDays(count: daysToShow), id: \.self) { day in
-                        Button {
-                            selectedDay = day
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(dayLabel(day))
-                                        .font(.system(size: 12, weight: .bold))
-                                    Text(monthDayLabel(day))
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(AppTheme.muted)
-                                }
-                                Spacer()
-                                Text("\(itemCount(for: day))")
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundStyle(isSelected(day) ? .white : AppTheme.blue)
-                                    .frame(width: 25, height: 22)
-                                    .background(isSelected(day) ? AppTheme.blue : AppTheme.panel2, in: Capsule())
-                            }
-                            .padding(10)
-                            .background(isSelected(day) ? AppTheme.blue.opacity(0.20) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected(day) ? AppTheme.blue.opacity(0.70) : Color.clear, lineWidth: 1))
-                        }
-                        .buttonStyle(.plain)
+            HStack(alignment: .top, spacing: 22) {
+                calendarRail
+                    .frame(width: 255)
+
+                VStack(alignment: .leading, spacing: 18) {
+                    header
+                    summaryAndTopics
+                    capturedItemsSection
+                    activityTimeline
+                }
+            }
+        }
+    }
+
+    private var calendarRail: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Button {
+                        visibleMonth = shiftedMonth(-1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                    }
+                    .buttonStyle(.plain)
+
+                    Text(monthYearLabel(visibleMonth))
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+
+                    Spacer()
+
+                    Button {
+                        visibleMonth = shiftedMonth(1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                HStack(spacing: 0) {
+                    ForEach(shortWeekdaySymbols(), id: \.self) { symbol in
+                        Text(symbol)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(AppTheme.muted)
+                            .frame(maxWidth: .infinity)
                     }
                 }
-                .frame(width: 235)
 
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(alignment: .firstTextBaseline) {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Journal — \(longDateLabel(selectedDay))")
-                                .font(.system(size: 22, weight: .bold, design: .rounded))
-                            Text(daySummary)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(AppTheme.muted)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer()
-                        HStack(spacing: 10) {
-                            JournalStat(value: "\(dayEvents.count)", label: "items captured", color: AppTheme.blue)
-                            JournalStat(value: "\(dayQueries.count)", label: "queries", color: Color.purple)
-                            JournalStat(value: "\(dayFailures.count)", label: "failed", color: dayFailures.isEmpty ? AppTheme.green : AppTheme.red)
-                            JournalStat(value: "\(dayNotes.count)", label: "notes", color: AppTheme.orange)
-                        }
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 4), count: 7), spacing: 5) {
+                    ForEach(monthGridDates(for: visibleMonth), id: \.self) { day in
+                        FinanceCalendarDayCell(
+                            day: day,
+                            isSelected: isSelected(day),
+                            isCurrentMonth: isSameMonth(day, visibleMonth),
+                            isToday: Calendar.current.isDateInToday(day),
+                            itemCount: itemCount(for: day),
+                            action: {
+                                selectedDay = day
+                            }
+                        )
                     }
+                }
+            }
 
-                    HStack(spacing: 9) {
-                        TextField("Capture a finance note, decision, vendor call, or thing to check tomorrow...", text: $noteText)
-                            .textFieldStyle(.roundedBorder)
-                            .onSubmit(saveNote)
-                        Button {
-                            saveNote()
-                        } label: {
-                            Label("New Note", systemImage: "square.and.pencil")
-                        }
-                        .buttonStyle(.borderedProminent)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("SELECT DAY")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(AppTheme.muted)
+                    .tracking(0.8)
+                ForEach(selectableDays, id: \.self) { day in
+                    FinanceDayListRow(
+                        day: day,
+                        count: itemCount(for: day),
+                        isSelected: isSelected(day),
+                        action: { selectedDay = day }
+                    )
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("QUICK ACTIONS")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(AppTheme.muted)
+                    .tracking(0.8)
+                HStack(spacing: 8) {
+                    Image(systemName: "square.and.pencil")
+                        .foregroundStyle(AppTheme.blue)
+                    TextField("New finance note", text: $noteText)
+                        .textFieldStyle(.plain)
+                        .onSubmit(saveNote)
+                }
+                .padding(10)
+                .background(AppTheme.panel2.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+
+                HStack {
+                    Button("Add Note") { saveNote() }
                         .disabled(noteText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        Button("Reveal") {
-                            model.revealFinanceNotes()
-                        }
-                        .buttonStyle(.bordered)
-                    }
+                    Button("Reveal") { model.revealFinanceNotes() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
 
-                    HStack(alignment: .top, spacing: 14) {
-                        JournalColumn(
-                            title: "What got done",
-                            systemImage: "checkmark.circle",
-                            rows: completedRows,
-                            empty: "No completed work recorded for this day."
-                        )
-                        JournalColumn(
-                            title: "What we learned",
-                            systemImage: "lightbulb",
-                            rows: learnedRows,
-                            empty: "No learned items yet."
-                        )
-                        JournalColumn(
-                            title: "Watch / failed",
-                            systemImage: "exclamationmark.triangle",
-                            rows: failureRows,
-                            empty: "No failures logged."
-                        )
-                    }
+            Spacer(minLength: 0)
+        }
+    }
 
-                    if !dayQueries.isEmpty || !dayNotes.isEmpty {
-                        HStack(alignment: .top, spacing: 14) {
-                            JournalColumn(
-                                title: "Past searches",
-                                systemImage: "magnifyingglass.circle",
-                                rows: queryRows,
-                                empty: "No analyst searches for this day."
-                            )
-                            JournalColumn(
-                                title: "Notes",
-                                systemImage: "note.text",
-                                rows: noteRows,
-                                empty: "No finance notes for this day."
-                            )
+    private var header: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Journal — \(longDateLabel(selectedDay))")
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                Text(selectedDaySubtitle)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(AppTheme.muted)
+            }
+            Spacer()
+            if Calendar.current.isDateInToday(selectedDay) {
+                Label("LIVE · \(journalTime(appTimestamp()))", systemImage: "circle.fill")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(AppTheme.green)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            HStack(spacing: 42) {
+                JournalHeaderMetric(value: "\(capturedItems.count)", label: "Items Captured", color: AppTheme.blue)
+                JournalHeaderMetric(value: "\(dayQueries.count)", label: "Queries", color: Color.purple)
+                JournalHeaderMetric(value: "\(dayNotes.count)", label: "Notes", color: AppTheme.green)
+                JournalHeaderMetric(value: "\(dayFailures.count)", label: "Failures", color: dayFailures.isEmpty ? AppTheme.orange : AppTheme.red)
+            }
+            .padding(.top, 38)
+        }
+        .padding(.bottom, 64)
+    }
+
+    private var summaryAndTopics: some View {
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 9) {
+                Label("DAY SUMMARY", systemImage: "sparkle")
+                    .font(.system(size: 12, weight: .black))
+                    .foregroundStyle(AppTheme.blue)
+                Text(daySummary)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("TOP TOPICS")
+                    .font(.system(size: 10, weight: .black))
+                    .foregroundStyle(AppTheme.muted)
+                    .tracking(0.8)
+                ForEach(topicRows, id: \.label) { topic in
+                    TopicChip(label: topic.label, color: topic.color)
+                }
+            }
+            .frame(width: 170, alignment: .leading)
+        }
+    }
+
+    private var capturedItemsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                SectionHeader(title: "Captured finance items (\(capturedItems.count))", systemImage: "square.grid.2x2")
+                Spacer()
+                Button("View All") {
+                    model.revealActivityJournal()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if capturedItems.isEmpty {
+                EmptyDarkText("No captured items for this day. Audits, bridge checks, analyst searches, exports, failures, and manual notes will appear here.")
+            } else {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 12) {
+                    ForEach(capturedItems.prefix(8)) { item in
+                        CapturedFinanceCard(item: item)
+                    }
+                }
+            }
+        }
+    }
+
+    private var activityTimeline: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Activity timeline", systemImage: "circle.grid.cross")
+            if capturedItems.isEmpty {
+                EmptyDarkText("No timeline for this day.")
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 20) {
+                        ForEach(capturedItems.prefix(12)) { item in
+                            TimelineBubble(item: item)
                         }
                     }
+                    .padding(.vertical, 4)
                 }
             }
         }
@@ -2449,52 +2541,98 @@ struct FinanceDailyJournalPanel: View {
         dayEvents.filter { $0.outcome.localizedCaseInsensitiveContains("fail") }
     }
 
-    private var completedRows: [JournalRowData] {
-        dayEvents
-            .filter { !$0.outcome.localizedCaseInsensitiveContains("fail") }
-            .prefix(6)
-            .map { JournalRowData(time: journalTime($0.timestamp), title: $0.title, detail: "\($0.kind) · \($0.outcome)") }
-    }
-
-    private var learnedRows: [JournalRowData] {
-        let learned = dayEvents.filter {
-            $0.outcome.localizedCaseInsensitiveContains("learn")
-                || $0.outcome.localizedCaseInsensitiveContains("connected")
-                || $0.outcome.localizedCaseInsensitiveContains("verified")
-                || $0.outcome.localizedCaseInsensitiveContains("captured")
+    private var capturedItems: [CapturedFinanceItem] {
+        let eventItems = dayEvents.map { event in
+            CapturedFinanceItem(
+                id: "event-\(event.id)",
+                timestamp: event.timestamp,
+                kind: event.kind.capitalized,
+                title: event.title,
+                detail: event.detail,
+                footer: event.outcome,
+                systemImage: iconFor(kind: event.kind, outcome: event.outcome),
+                color: colorFor(kind: event.kind, outcome: event.outcome)
+            )
         }
-        return learned.prefix(6).map {
-            JournalRowData(time: journalTime($0.timestamp), title: $0.title, detail: $0.detail)
+        let queryItems = dayQueries.map { query in
+            CapturedFinanceItem(
+                id: "query-\(query.id)",
+                timestamp: query.timestamp,
+                kind: "Query",
+                title: query.question,
+                detail: query.answer,
+                footer: query.outcome,
+                systemImage: "bubble.left.and.text.bubble.right.fill",
+                color: Color.purple
+            )
         }
-    }
-
-    private var failureRows: [JournalRowData] {
-        dayFailures.prefix(6).map {
-            JournalRowData(time: journalTime($0.timestamp), title: $0.title, detail: $0.detail)
+        let noteItems = dayNotes.map { note in
+            CapturedFinanceItem(
+                id: "note-\(note.id)",
+                timestamp: note.timestamp,
+                kind: "Note",
+                title: note.text,
+                detail: "Manual finance note",
+                footer: "captured",
+                systemImage: "note.text",
+                color: AppTheme.green
+            )
         }
-    }
-
-    private var queryRows: [JournalRowData] {
-        dayQueries.prefix(6).map {
-            JournalRowData(time: journalTime($0.timestamp), title: $0.question, detail: $0.outcome)
-        }
-    }
-
-    private var noteRows: [JournalRowData] {
-        dayNotes.prefix(6).map {
-            JournalRowData(time: journalTime($0.timestamp), title: $0.text, detail: "manual note")
+        return (eventItems + queryItems + noteItems).sorted {
+            (parseJournalDate($0.timestamp) ?? .distantPast) > (parseJournalDate($1.timestamp) ?? .distantPast)
         }
     }
 
     private var daySummary: String {
-        if dayEvents.isEmpty && dayQueries.isEmpty && dayNotes.isEmpty {
-            return "No captured finance work yet. Notes, analyst searches, audits, exports, bridge checks, and failures will appear here by day."
+        if capturedItems.isEmpty {
+            return "No finance work has been captured for this day yet. When you run audits, ask questions, check VM/RM sources, export reports, or add notes, this becomes the daily financial memory."
         }
-        let done = completedRows.count
+        let topics = topicRows.prefix(3).map(\.label).joined(separator: ", ")
         let failed = dayFailures.count
-        let queries = dayQueries.count
-        let notes = dayNotes.count
-        return "\(done) completed work item(s), \(queries) analyst search(es), \(notes) note(s), \(failed) failure(s). This is the day log for what changed, what was learned, and what still needs attention."
+        let failureText = failed == 0 ? "No failed items are logged." : "\(failed) item(s) need follow-up."
+        return "Finance work centered on \(topics.isEmpty ? "connected evidence" : topics). The record contains \(capturedItems.count) captured item(s): \(dayEvents.count) system action(s), \(dayQueries.count) analyst search(es), and \(dayNotes.count) note(s). \(failureText)"
+    }
+
+    private var selectedDaySubtitle: String {
+        "\(dayLabel(selectedDay)) · \(itemCount(for: selectedDay)) item(s) · \(monthDayLabel(selectedDay))"
+    }
+
+    private var topicRows: [FinanceTopic] {
+        var counts: [String: Int] = [:]
+        for event in dayEvents {
+            counts[event.kind.capitalized, default: 0] += 1
+            if event.outcome.localizedCaseInsensitiveContains("fail") {
+                counts["Failed", default: 0] += 1
+            }
+        }
+        if !dayQueries.isEmpty { counts["Query", default: 0] += dayQueries.count }
+        if !dayNotes.isEmpty { counts["Notes", default: 0] += dayNotes.count }
+        if model.journal.overview.totalExposure > 0 && Calendar.current.isDateInToday(selectedDay) {
+            counts["At Risk", default: 0] += 1
+        }
+        if model.legacyBridge.isOperational && Calendar.current.isDateInToday(selectedDay) {
+            counts["VM/RM", default: 0] += 1
+        }
+        let rows = counts
+            .sorted { lhs, rhs in
+                if lhs.value == rhs.value { return lhs.key < rhs.key }
+                return lhs.value > rhs.value
+            }
+            .prefix(6)
+            .map { FinanceTopic(label: $0.key, color: colorFor(topic: $0.key)) }
+        if rows.isEmpty {
+            return [FinanceTopic(label: "Finance", color: AppTheme.blue)]
+        }
+        return Array(rows)
+    }
+
+    private var selectableDays: [Date] {
+        let today = Calendar.current.startOfDay(for: Date())
+        return daysInMonth(visibleMonth)
+            .filter { $0 <= today || isSameMonth(visibleMonth, today) == false }
+            .sorted(by: >)
+            .prefix(14)
+            .map { $0 }
     }
 
     private func saveNote() {
@@ -2514,68 +2652,230 @@ struct FinanceDailyJournalPanel: View {
     private func isSelected(_ day: Date) -> Bool {
         Calendar.current.isDate(day, inSameDayAs: selectedDay)
     }
+
+    private func shiftedMonth(_ delta: Int) -> Date {
+        Calendar.current.date(byAdding: .month, value: delta, to: visibleMonth) ?? visibleMonth
+    }
+
+    private func colorFor(kind: String, outcome: String) -> Color {
+        if outcome.localizedCaseInsensitiveContains("fail") { return AppTheme.red }
+        switch kind.lowercased() {
+        case "query": return Color.purple
+        case "note": return AppTheme.green
+        case "audit": return AppTheme.orange
+        case "legacy-bridge": return AppTheme.blue
+        case "export", "share": return AppTheme.green
+        default: return AppTheme.blue
+        }
+    }
+
+    private func iconFor(kind: String, outcome: String) -> String {
+        if outcome.localizedCaseInsensitiveContains("fail") { return "exclamationmark.triangle.fill" }
+        switch kind.lowercased() {
+        case "query": return "bubble.left.and.text.bubble.right.fill"
+        case "note": return "note.text"
+        case "audit": return "doc.text.magnifyingglass"
+        case "legacy-bridge": return "display.and.arrow.down"
+        case "export", "share": return "square.and.arrow.up"
+        default: return "doc.badge.gearshape"
+        }
+    }
+
+    private func colorFor(topic: String) -> Color {
+        switch topic.lowercased() {
+        case "failed": return AppTheme.red
+        case "query": return Color.purple
+        case "notes": return AppTheme.green
+        case "at risk": return AppTheme.orange
+        case "vm/rm": return AppTheme.blue
+        default: return AppTheme.blue
+        }
+    }
 }
 
-struct JournalStat: View {
+struct FinanceCalendarDayCell: View {
+    let day: Date
+    let isSelected: Bool
+    let isCurrentMonth: Bool
+    let isToday: Bool
+    let itemCount: Int
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack(alignment: .bottomTrailing) {
+                Text("\(Calendar.current.component(.day, from: day))")
+                    .font(.system(size: 12, weight: isToday || isSelected ? .bold : .semibold, design: .rounded))
+                    .foregroundStyle(isSelected ? .white : (isCurrentMonth ? .white.opacity(0.88) : AppTheme.muted.opacity(0.55)))
+                    .frame(width: 28, height: 28)
+                    .background(isSelected ? AppTheme.blue : (isToday ? AppTheme.blue.opacity(0.20) : Color.clear), in: Circle())
+                if itemCount > 0 {
+                    Circle()
+                        .fill(AppTheme.green)
+                        .frame(width: 5, height: 5)
+                        .offset(x: -3, y: -3)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+        .opacity(isCurrentMonth ? 1 : 0.45)
+    }
+}
+
+struct FinanceDayListRow: View {
+    let day: Date
+    let count: Int
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(dayLabel(day))
+                        .font(.system(size: 14, weight: .bold))
+                    Text(monthDayLabel(day))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Spacer()
+                Text("\(count) item\(count == 1 ? "" : "s")")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AppTheme.muted)
+            }
+            .padding(11)
+            .background(isSelected ? AppTheme.blue.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? AppTheme.blue.opacity(0.90) : Color.clear, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct JournalHeaderMetric: View {
     let value: String
     let label: String
     let color: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(value)
-                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .font(.system(size: 22, weight: .bold, design: .rounded))
                 .foregroundStyle(color)
             Text(label)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(AppTheme.muted)
-                .lineLimit(1)
         }
-        .frame(width: 88, alignment: .leading)
     }
 }
 
-struct JournalRowData: Identifiable {
-    let id = UUID()
-    let time: String
+struct CapturedFinanceItem: Identifiable {
+    let id: String
+    let timestamp: String
+    let kind: String
     let title: String
     let detail: String
+    let footer: String
+    let systemImage: String
+    let color: Color
 }
 
-struct JournalColumn: View {
-    let title: String
-    let systemImage: String
-    let rows: [JournalRowData]
-    let empty: String
+struct CapturedFinanceCard: View {
+    let item: CapturedFinanceItem
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            SectionHeader(title: title, systemImage: systemImage)
-            if rows.isEmpty {
-                EmptyDarkText(empty)
-            } else {
-                ForEach(rows) { row in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(row.time)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundStyle(AppTheme.blue)
-                            Spacer()
-                        }
-                        Text(row.title)
-                            .font(.system(size: 12, weight: .bold))
-                            .lineLimit(2)
-                        Text(row.detail)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(AppTheme.muted)
-                            .lineLimit(2)
-                    }
-                    .padding(9)
-                    .background(AppTheme.panel2.opacity(0.62), in: RoundedRectangle(cornerRadius: 10))
-                }
+            HStack {
+                Label(item.kind, systemImage: item.systemImage)
+                    .font(.system(size: 10, weight: .black))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .background(item.color, in: Capsule())
+                Spacer()
+                Image(systemName: "ellipsis")
+                    .foregroundStyle(AppTheme.muted)
+            }
+            Spacer(minLength: 4)
+            Text(journalTime(item.timestamp))
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(AppTheme.muted)
+            Text(item.title)
+                .font(.system(size: 13, weight: .bold))
+                .lineLimit(2)
+            Text(item.detail)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(AppTheme.muted)
+                .lineLimit(3)
+            HStack {
+                TopicChip(label: item.footer, color: item.color)
+                Spacer()
             }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .padding(12)
+        .frame(minHeight: 168, alignment: .topLeading)
+        .background(AppTheme.panel2.opacity(0.62), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(AppTheme.stroke, lineWidth: 1))
+    }
+}
+
+struct TimelineBubble: View {
+    let item: CapturedFinanceItem
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(item.color)
+                    .frame(width: 44, height: 44)
+                Image(systemName: item.systemImage)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(journalTime(item.timestamp))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(AppTheme.muted)
+                    if item.footer.localizedCaseInsensitiveContains("infer") {
+                        Text("· inferred")
+                            .font(.system(size: 10, weight: .black))
+                            .foregroundStyle(AppTheme.orange)
+                    }
+                }
+                Text(item.title)
+                    .font(.system(size: 11, weight: .bold))
+                    .lineLimit(1)
+                Text(item.kind)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(AppTheme.muted)
+            }
+        }
+        .frame(width: 190, alignment: .leading)
+    }
+}
+
+struct FinanceTopic {
+    let label: String
+    let color: Color
+}
+
+struct TopicChip: View {
+    let label: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 10, weight: .bold))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(color.opacity(0.13), in: Capsule())
+        .overlay(Capsule().stroke(color.opacity(0.65), lineWidth: 1))
     }
 }
 
@@ -4479,6 +4779,50 @@ func recentDays(count: Int) -> [Date] {
     return (0..<count).compactMap { offset in
         calendar.date(byAdding: .day, value: -offset, to: start)
     }
+}
+
+func shortWeekdaySymbols() -> [String] {
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+}
+
+func startOfMonth(_ date: Date) -> Date {
+    let calendar = Calendar.current
+    let components = calendar.dateComponents([.year, .month], from: date)
+    return calendar.date(from: components) ?? calendar.startOfDay(for: date)
+}
+
+func monthGridDates(for month: Date) -> [Date] {
+    let calendar = Calendar.current
+    let first = startOfMonth(month)
+    let weekday = calendar.component(.weekday, from: first)
+    let gridStart = calendar.date(byAdding: .day, value: -(weekday - 1), to: first) ?? first
+    return (0..<42).compactMap { offset in
+        calendar.date(byAdding: .day, value: offset, to: gridStart)
+    }
+}
+
+func daysInMonth(_ month: Date) -> [Date] {
+    let calendar = Calendar.current
+    let start = startOfMonth(month)
+    guard let range = calendar.range(of: .day, in: .month, for: start) else {
+        return []
+    }
+    return range.compactMap { day -> Date? in
+        calendar.date(byAdding: .day, value: day - 1, to: start)
+    }
+}
+
+func isSameMonth(_ lhs: Date, _ rhs: Date) -> Bool {
+    let calendar = Calendar.current
+    let left = calendar.dateComponents([.year, .month], from: lhs)
+    let right = calendar.dateComponents([.year, .month], from: rhs)
+    return left.year == right.year && left.month == right.month
+}
+
+func monthYearLabel(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "MMMM yyyy"
+    return formatter.string(from: date)
 }
 
 func parseJournalDate(_ timestamp: String) -> Date? {

@@ -155,8 +155,9 @@ The five persistent areas are:
 
 0. **Today** — the morning financial briefing: deterministic money at risk,
    missing AP/AR feeds called out honestly, urgent work items, recent history,
-   category/vendor exposure, a LIST-style day calendar/journal, manual finance
-   notes, and a “follow the dollar” trace from exposure back to
+   category/vendor exposure, a LIST-style month calendar with selected-day rail,
+   day summary, captured-item cards, activity timeline, top topics, manual
+   finance notes, and a “follow the dollar” trace from exposure back to
    invoice/vendor/line/source evidence.
 1. **Money** — choose invoice/PDF folder, Excel/CSV price sheets, and confirm
    the connected SQLite evidence database. The Money screen also exposes the
