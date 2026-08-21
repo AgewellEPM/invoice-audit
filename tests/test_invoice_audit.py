@@ -1184,9 +1184,10 @@ def test_savings_report_sums_money_caught_per_source():
     assert r["breakdown"]["priceHistoryUSD"] == 6060.0
     assert r["breakdown"]["industryBenchmarkUSD"] == 2780.0
     assert r["breakdown"]["policyUSD"] == 120.0
-    # Honest: max(history, industry) + policy — never the double-counting sum.
-    assert r["moneyCaughtUSD"] == 6180.0
-    assert r["moneyCaughtUSD"] < 6060.0 + 2780.0 + 120.0  # provably not summed
+    # HARD RULE: banked money = DETERMINISTIC-only (own history + policy). The
+    # ML-researched industry number is a review signal, NEVER banked.
+    assert r["moneyCaughtUSD"] == 6180.0                      # 6060 history + 120 policy
+    assert r["industryReviewSignalUSD"] == 2780.0            # surfaced, not summed
     assert r["flagsFound"] == 4
     # "Things you'd have missed" surfaced per source.
     assert r["itemsSurfaced"]["noPriceHistory"] == 1
@@ -1194,6 +1195,26 @@ def test_savings_report_sums_money_caught_per_source():
     assert r["itemsSurfaced"]["dataQuality"] == 1
     assert "industry" in r["headline"].lower()
     assert "6,180" in savings_text(_savings_fixture_receipt())
+
+
+def test_savings_never_banks_ml_industry_even_when_larger():
+    # The exact leak: when the kist-researched (ML) industry overpay is BIGGER
+    # than the deterministic history, it must STILL never enter the banked figure.
+    ml_bigger = {
+        "totals": {"invoices": 1, "linesChecked": 1, "flagged": 1,
+                   "potentialOverchargeUSD": 100.0, "marketOverchargeUSD": 9000.0,
+                   "policyOverageUSD": 0.0, "dataQualityIssues": 0},
+        "reviewQueue": [
+            {"invoice": "i1", "kind": "market-overcharge-flag", "line": 0, "detail": "ml"},
+        ],
+    }
+    r = savings_report(ml_bigger)
+    assert r["moneyCaughtUSD"] == 100.0            # deterministic history ONLY
+    assert r["moneyCaughtUSD"] != 9000.0           # ML value never banked
+    assert r["industryReviewSignalUSD"] == 9000.0  # it lives here instead
+    # And the human-facing text must not present the ML figure as banked money.
+    txt = savings_text(ml_bigger)
+    assert "NOT banked" in txt
 
 
 def test_savings_clean_receipt_has_zero_caught_and_clean_headline():

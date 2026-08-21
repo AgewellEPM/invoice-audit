@@ -31,12 +31,12 @@ def savings_report(receipt: dict) -> dict:
     history_usd = float(totals.get("potentialOverchargeUSD", 0.0) or 0.0)
     market_usd = float(totals.get("marketOverchargeUSD", 0.0) or 0.0)
     policy_usd = float(totals.get("policyOverageUSD", 0.0) or 0.0)
-    # HONEST figure: price-history overcharge and industry-benchmark overpay are
-    # two OVERLAPPING baselines measured on the same lines (the same overpriced
-    # part is flagged by both). Summing them would double-count recoverable cash.
-    # Take the larger baseline as the recoverable exposure, then add policy
-    # overage (a distinct taught-rule breach). This never overstates.
-    money_caught = round(max(history_usd, market_usd) + policy_usd, 2)
+    # HARD RULE — no ML touches the banked number. The banked money figure comes
+    # ONLY from DETERMINISTIC-FACT sources: the customer's OWN price history and
+    # the taught policy floor (symbolic/Jeeves). The kist-researched industry
+    # benchmark is ML-RETRIEVED — a librarian, not a judge — so it is surfaced as
+    # a REVIEW SIGNAL beside the number and is NEVER banked into it.
+    money_caught = round(history_usd + policy_usd, 2)
 
     surfaced = {"noPriceHistory": 0, "noIndustryBenchmark": 0,
                 "ungrounded": 0, "dataQuality": 0}
@@ -66,7 +66,10 @@ def savings_report(receipt: dict) -> dict:
         "invoices": int(totals.get("invoices", 0) or 0),
         "linesChecked": int(totals.get("linesChecked", 0) or 0),
         "flagsFound": int(totals.get("flagged", len(queue)) or 0),
-        "moneyCaughtUSD": money_caught,
+        "moneyCaughtUSD": money_caught,  # deterministic-only (own history + policy)
+        # ML-retrieved industry overpay — reported for review, NEVER banked above.
+        "industryReviewSignalUSD": round(market_usd, 2),
+        "industryReviewSource": "kist-researched (ML) — review only, not banked",
         "breakdown": {
             "priceHistoryUSD": round(history_usd, 2),
             "industryBenchmarkUSD": round(market_usd, 2),
@@ -95,11 +98,11 @@ def _headline(receipt: dict, money_caught: float, market_usd: float,
     if flagged == 0:
         return (f"Reviewed {invoices} invoice(s) and found nothing to recover — "
                 "clean, and now proven with a signed receipt.")
-    parts = [f"Found {flagged} issue(s) across {invoices} invoice(s) flagging "
-             f"${money_caught:,.2f} in overpay exposure"]
+    parts = [f"Found {flagged} issue(s) across {invoices} invoice(s) — "
+             f"${money_caught:,.2f} in deterministic, sourced overpay exposure"]
     if market_usd > 0:
-        parts.append(f"corroborated by ${market_usd:,.2f} above industry pricing "
-                     "you'd never have thought to check")
+        parts.append(f"plus ${market_usd:,.2f} flagged above industry pricing to "
+                     "review (kist-researched estimate — not banked)")
     missed = surfaced.get("total", 0)
     if missed > 0:
         parts.append(f"and surfaced {missed} item(s) you'd otherwise have missed")
@@ -112,10 +115,11 @@ def savings_text(receipt: dict) -> str:
     lines = [
         r["headline"],
         "",
-        f"Overpay exposure flagged (conservative, no double-count): ${r['moneyCaughtUSD']:,.2f}",
+        f"Banked overpay exposure (deterministic, sourced): ${r['moneyCaughtUSD']:,.2f}",
         f"  • Price-history overcharge : ${b['priceHistoryUSD']:,.2f}",
-        f"  • Above industry benchmark : ${b['industryBenchmarkUSD']:,.2f}",
         f"  • Policy overage           : ${b['policyUSD']:,.2f}",
+        f"Review signal (kist-researched, NOT banked): ${r['industryReviewSignalUSD']:,.2f}",
+        f"  • Above industry benchmark : ${b['industryBenchmarkUSD']:,.2f}",
         f"Flags found: {r['flagsFound']}   Lines checked: {r['linesChecked']}",
         f"Items you'd have missed: {r['itemsSurfaced']['total']}",
     ]

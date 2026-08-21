@@ -125,10 +125,11 @@ struct SavingsSummary {
     let itemsSurfaced: Int
     let headline: String
 
-    // Conservative, non-double-counting: price-history and industry overpay are
-    // overlapping baselines on the same lines, so take the larger, then add the
-    // distinct policy overage. Never overstates recoverable exposure.
-    var moneyCaught: Double { max(max(priceHistory, 0), max(industry, 0)) + max(policy, 0) }
+    // HARD RULE — no ML touches the banked number. Banked = DETERMINISTIC-fact
+    // sources only (own price history + taught policy floor). The kist-researched
+    // industry benchmark is ML-retrieved — a review signal, NEVER banked.
+    var moneyCaught: Double { max(priceHistory, 0) + max(policy, 0) }
+    var industryReviewSignal: Double { max(industry, 0) }
 
     init(receipt: ReceiptSummary) {
         let t = receipt.totals
@@ -140,13 +141,14 @@ struct SavingsSummary {
         let surfaced: Set<String> = ["no-reference", "market-no-reference", "ungrounded", "weak-grounding"]
         itemsSurfaced = receipt.findings.filter { surfaced.contains($0.kind) }.count
 
-        let caught = max(t.potentialOvercharge, 0) + max(t.marketOvercharge, 0) + max(t.policyOverage, 0)
+        // Banked = deterministic-only; ML industry figure is NEVER folded in.
+        let caught = max(t.potentialOvercharge, 0) + max(t.policyOverage, 0)
         if t.flagged == 0 {
             headline = "Reviewed \(t.invoices) invoice(s) and found nothing to recover — clean, and now proven with a signed receipt."
         } else {
-            var parts = ["Found \(t.flagged) issue(s) across \(t.invoices) invoice(s) flagging \(dollars(caught)) in overpay exposure"]
+            var parts = ["Found \(t.flagged) issue(s) across \(t.invoices) invoice(s) — \(dollars(caught)) in deterministic, sourced overpay exposure"]
             if t.marketOvercharge > 0 {
-                parts.append("corroborated by \(dollars(t.marketOvercharge)) above industry pricing you'd never have thought to check")
+                parts.append("plus \(dollars(t.marketOvercharge)) flagged above industry pricing to review (kist estimate — not banked)")
             }
             if itemsSurfaced > 0 {
                 parts.append("and surfaced \(itemsSurfaced) item(s) you'd otherwise have missed")
@@ -182,7 +184,7 @@ struct SavingsDashboardPanel: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     HStack(spacing: 14) {
-                        SavingsStat(label: "OVERPAY EXPOSURE", value: dollars(s.moneyCaught),
+                        SavingsStat(label: "BANKED (SOURCED)", value: dollars(s.moneyCaught),
                                     color: s.moneyCaught > 0 ? AppTheme.green : AppTheme.muted)
                         SavingsStat(label: "FLAGS FOUND", value: "\(s.flags)",
                                     color: s.flags > 0 ? AppTheme.orange : AppTheme.green)
@@ -190,17 +192,34 @@ struct SavingsDashboardPanel: View {
                                     color: AppTheme.blue)
                     }
 
+                    // Banked = deterministic-fact sources ONLY. No ML dollar here.
                     VStack(alignment: .leading, spacing: 8) {
                         SavingsBreakdownRow(label: "Price-history overcharge",
                                             value: s.priceHistory, total: s.moneyCaught, color: AppTheme.red)
-                        SavingsBreakdownRow(label: "Above industry benchmark",
-                                            value: s.industry, total: s.moneyCaught, color: AppTheme.orange)
                         SavingsBreakdownRow(label: "Policy overage",
                                             value: s.policy, total: s.moneyCaught, color: Color.purple)
                     }
-                    Text("Every dollar here is a deterministic flag bound into a signed, re-verifiable receipt — not an estimate.")
+                    Text("Banked = deterministic, sourced flags only (own price history + taught policy), bound into a signed, re-verifiable receipt — never an ML estimate.")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(AppTheme.muted)
+
+                    // ML-retrieved industry overpay — a REVIEW SIGNAL, never banked.
+                    if s.industryReviewSignal > 0 {
+                        HStack(spacing: 10) {
+                            Image(systemName: "magnifyingglass.circle.fill")
+                                .foregroundStyle(AppTheme.orange)
+                            Text("Review signal · above industry pricing — kist-researched (ML), NOT banked")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(AppTheme.orange)
+                            Spacer()
+                            Text(dollars(s.industryReviewSignal))
+                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                .foregroundStyle(AppTheme.orange)
+                        }
+                        .padding(9)
+                        .background(AppTheme.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(AppTheme.orange.opacity(0.4), lineWidth: 1))
+                    }
                 } else {
                     EmptyDarkText("Run an audit to see the savings story: what we caught, what you'd have missed, and how much money it protected.")
                 }
