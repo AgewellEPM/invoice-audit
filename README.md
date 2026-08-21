@@ -160,12 +160,16 @@ The five persistent areas are:
    finance notes, and a “follow the dollar” trace from exposure back to
    invoice/vendor/line/source evidence.
 1. **Money** — choose invoice/PDF folder, Excel/CSV price sheets, and confirm
-   the connected SQLite evidence database. The Money screen also exposes the
-   local **Legacy VM/RM bridge** for old payroll, RM, ERP, or plant computers.
-   It probes Kist Work Agent at `http://127.0.0.1:8765`, the active
-   `/api/vm-stage-status`/scan endpoints, and local Perslis/RM/QEMU processes
-   so the UI can show the real Win11/legacy VM attachment before extracted PDFs,
-   CSV, Excel, or API JSON are imported here.
+   the connected SQLite evidence database. Pressing **Run** from the Money
+   source cards or capture panel opens a live four-lane capture workspace:
+   source queue, real scanned invoice/receipt image, OCR → normalized digital
+   rows, and the living `invoice_lines.csv` grid exported from SQLite. The Money
+   screen also exposes the local **Legacy VM/RM bridge** for old payroll, RM,
+   ERP, or plant computers. It probes Kist Work Agent at
+   `http://127.0.0.1:8765`, the active `/api/vm-stage-status`/scan endpoints,
+   and local Perslis/RM/QEMU processes so the UI can show the real Win11/legacy
+   VM attachment before extracted PDFs, CSV, Excel, or API JSON are imported
+   here.
 2. **Investigate** — run OCR/extraction/price checks and create the signed
    receipt/report. The LLM can extract, normalize, classify, search, and explain;
    deterministic software calculates price variance, exposure, grounding, and
