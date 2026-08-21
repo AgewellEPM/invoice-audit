@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Financial Ops Copilot — UX & Evidence Flow</title>
+<style>
+  :root{
+    --bg:#060d15; --panel:#0b141e; --panel2:#0d1926; --stroke:#1b2e40;
+    --ink:#eaf1f8; --muted:#8f9eb3;
+    --blue:#1379fa; --green:#19d16e; --orange:#ff9e14; --red:#ff4752;
+    --purple:#a06bff;
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Inter,system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:
+     radial-gradient(1200px 700px at 20% -10%, #0d2033 0%, transparent 60%),
+     radial-gradient(1000px 600px at 100% 0%, #10151f 0%, transparent 55%),
+     var(--bg);
+     color:var(--ink);font-family:var(--font);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1640px;margin:0 auto;padding:40px 40px 80px}
+  .eyebrow{font-size:12px;font-weight:800;letter-spacing:.14em;color:var(--blue);text-transform:uppercase}
+  h1{font-size:34px;font-weight:800;letter-spacing:-.02em;margin:6px 0 8px}
+  .sub{color:var(--muted);font-size:15px;font-weight:500;max-width:920px;line-height:1.5}
+  .thesis{margin:22px 0 8px;display:flex;gap:14px;align-items:flex-start;
+    background:linear-gradient(90deg,rgba(19,121,250,.10),rgba(19,121,250,0));
+    border:1px solid var(--stroke);border-left:3px solid var(--blue);
+    border-radius:14px;padding:16px 18px}
+  .thesis b{color:var(--ink)}
+  .thesis span{color:var(--muted);font-size:14px;line-height:1.5}
+  .card{background:linear-gradient(180deg,var(--panel),#0a121b);
+    border:1px solid var(--stroke);border-radius:20px;padding:26px 26px 12px;margin-top:34px;
+    box-shadow:0 24px 60px -40px #000}
+  .card h2{font-size:19px;font-weight:800;margin:0 0 2px;letter-spacing:-.01em}
+  .card .cap{color:var(--muted);font-size:13px;font-weight:500;margin-bottom:8px}
+  .num{display:inline-flex;width:24px;height:24px;border-radius:8px;background:var(--blue);
+    color:#fff;font-size:12px;font-weight:800;align-items:center;justify-content:center;margin-right:10px;vertical-align:2px}
+  svg{width:100%;height:auto;display:block}
+  .legend{display:flex;flex-wrap:wrap;gap:10px 22px;margin:18px 4px 26px;align-items:center}
+  .lg{display:flex;align-items:center;gap:9px;font-size:12.5px;color:var(--muted);font-weight:600}
+  .sw{width:26px;height:16px;border-radius:5px;border:1px solid var(--stroke)}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .foot{margin-top:34px;color:var(--muted);font-size:12.5px;line-height:1.6;border-top:1px solid var(--stroke);padding-top:18px}
+  .tag{display:inline-block;border:1px solid var(--stroke);border-radius:999px;padding:3px 10px;font-size:11px;font-weight:700;color:var(--muted)}
+  /* ---- SVG node system ---- */
+  svg text{font-family:var(--font)}
+  .n-t{font-size:15px;font-weight:800;fill:var(--ink)}
+  .n-s{font-size:11.5px;font-weight:600;fill:var(--muted)}
+  .n-k{font-size:11px;font-weight:800;letter-spacing:.06em;fill:var(--muted)}
+  .rail-t{font-size:15px;font-weight:800;fill:var(--red)}
+  .chip{font-size:11.5px;font-weight:800;fill:#ffd9dc}
+  .lbl{font-size:11px;font-weight:700;fill:var(--muted)}
+  .flowlbl{font-size:11px;font-weight:800;fill:var(--blue)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Financial Ops Copilot · Invoice-Audit</div>
+  <h1>UX &amp; Evidence Flow</h1>
+  <div class="sub">How an operator moves through the product, and how a single suspicious dollar becomes a signed, re-verifiable proof. Two artboards: the <b style="color:#eaf1f8">task flow</b> (what the human does) and the <b style="color:#eaf1f8">evidence pipeline</b> (how the system decides — and where it refuses to).</div>
+
+  <div class="thesis">
+    <div class="dot" style="background:var(--orange);margin-top:5px"></div>
+    <span><b>The one rule the whole design protects:</b> OCR is the <b>only</b> probabilistic step. Every money decision after it — arithmetic, grounding, price, industry benchmark, policy — is deterministic, traceable, and <b>fail-closed</b>. No model decides money; a person clears every flag. The receipt is the product.</span>
+  </div>
+
+  <!-- ========================================================= -->
+  <!-- ARTBOARD 1 — TASK FLOW                                    -->
+  <!-- ========================================================= -->
+  <div class="card">
+    <h2><span class="num">1</span>Task flow — the operator's day</h2>
+    <div class="cap">Top nav + left rail are persistent; the operator can jump anywhere. The arrows show the <i>intended</i> daily path — triage, then act.</div>
+    <svg viewBox="0 0 1560 340" role="img" aria-label="Task flow diagram">
+      <defs>
+        <marker id="ah" markerWidth="12" markerHeight="12" refX="8" refY="4" orient="auto">
+          <path d="M0,0 L9,4 L0,8 Z" fill="#3f6f9e"/>
+        </marker>
+        <marker id="ahb" markerWidth="12" markerHeight="12" refX="8" refY="4" orient="auto">
+          <path d="M0,0 L9,4 L0,8 Z" fill="#1379fa"/>
+        </marker>
+      </defs>
+
+      <text x="40" y="34" class="n-k">LAUNCH → auto-loads the latest signed receipt &amp; morning briefing</text>
+
+      <!-- TODAY hub -->
+      <g>
+        <rect x="40" y="70" width="250" height="150" rx="16" fill="#0c1b2b" stroke="#26456a"/>
+        <rect x="40" y="70" width="250" height="30" rx="16" fill="#12385f"/>
+        <text x="60" y="90" class="n-k" fill="#8fc2ff">TODAY · MORNING BRIEF</text>
+        <text x="60" y="126" class="n-t">Triage what's at risk</text>
+        <text x="60" y="150" class="n-s">SOS money-at-risk first</text>
+        <text x="60" y="170" class="n-s">Journal · captured items</text>
+        <text x="60" y="190" class="n-s">"What needs attention?"</text>
+      </g>
+
+      <!-- 4 work areas -->
+      <g>
+        <rect x="340" y="70" width="250" height="150" rx="16" fill="var(--panel2)" stroke="var(--stroke)"/>
+        <circle cx="366" cy="98" r="13" fill="var(--blue)"/><text x="366" y="103" text-anchor="middle" font-size="13" font-weight="800" fill="#fff">1</text>
+        <text x="390" y="103" class="n-t">Money</text>
+        <text x="360" y="132" class="n-s">Connect sources &amp; capture</text>
+        <text x="360" y="154" class="n-s">• Invoices/PDF · Excel · SQL</text>
+        <text x="360" y="174" class="n-s">• Run the audit pipeline</text>
+        <text x="360" y="194" class="n-s">• Legacy VM/RM bridge</text>
+      </g>
+      <g>
+        <rect x="640" y="70" width="250" height="150" rx="16" fill="var(--panel2)" stroke="var(--stroke)"/>
+        <circle cx="666" cy="98" r="13" fill="var(--orange)"/><text x="666" y="103" text-anchor="middle" font-size="13" font-weight="800" fill="#3a2400">2</text>
+        <text x="690" y="103" class="n-t">Investigate</text>
+        <text x="660" y="132" class="n-s">Find the leakage</text>
+        <text x="660" y="154" class="n-s">• Follow the dollar (lineage)</text>
+        <text x="660" y="174" class="n-s">• Overpay vs industry (kist)</text>
+        <text x="660" y="194" class="n-s">• Review queue &amp; evidence</text>
+      </g>
+      <g>
+        <rect x="940" y="70" width="250" height="150" rx="16" fill="var(--panel2)" stroke="var(--stroke)"/>
+        <circle cx="966" cy="98" r="13" fill="var(--green)"/><text x="966" y="103" text-anchor="middle" font-size="13" font-weight="800" fill="#062713">3</text>
+        <text x="990" y="103" class="n-t">Work</text>
+        <text x="960" y="132" class="n-s">Act &amp; export</text>
+        <text x="960" y="154" class="n-s">• CSV / SQL grid</text>
+        <text x="960" y="174" class="n-s">• Boss email · HTML report</text>
+        <text x="960" y="194" class="n-s">• Slack / Zapier webhook</text>
+      </g>
+      <g>
+        <rect x="1240" y="70" width="250" height="150" rx="16" fill="var(--panel2)" stroke="var(--stroke)"/>
+        <circle cx="1266" cy="98" r="13" fill="var(--purple)"/><text x="1266" y="103" text-anchor="middle" font-size="13" font-weight="800" fill="#1c0d3a">4</text>
+        <text x="1290" y="103" class="n-t">Ask</text>
+        <text x="1260" y="132" class="n-s">Analyst Q&amp;A</text>
+        <text x="1260" y="154" class="n-s">• Answers from SQL evidence</text>
+        <text x="1260" y="174" class="n-s">• Cites source invoices/lines</text>
+        <text x="1260" y="194" class="n-s">• Never invents facts</text>
+      </g>
+
+      <!-- forward arrows -->
+      <line x1="290" y1="145" x2="336" y2="145" stroke="#1379fa" stroke-width="2.5" marker-end="url(#ahb)"/>
+      <line x1="590" y1="145" x2="636" y2="145" stroke="#3f6f9e" stroke-width="2.5" marker-end="url(#ah)"/>
+      <line x1="890" y1="145" x2="936" y2="145" stroke="#3f6f9e" stroke-width="2.5" marker-end="url(#ah)"/>
+      <line x1="1190" y1="145" x2="1236" y2="145" stroke="#3f6f9e" stroke-width="2.5" marker-end="url(#ah)"/>
+
+      <!-- daily loop return -->
+      <path d="M1365 220 C1365 300, 165 300, 165 224" fill="none" stroke="#3f6f9e" stroke-width="2" stroke-dasharray="2 6" marker-end="url(#ah)"/>
+      <text x="765" y="296" text-anchor="middle" class="lbl">daily loop · new evidence re-briefs Today</text>
+    </svg>
+  </div>
+
+  <!-- ========================================================= -->
+  <!-- ARTBOARD 2 — EVIDENCE PIPELINE                            -->
+  <!-- ========================================================= -->
+  <div class="card">
+    <h2><span class="num">2</span>Evidence pipeline — how a dollar is proven</h2>
+    <div class="cap">Top-to-bottom is the deterministic pipeline. Every gate that isn't satisfied fails <b>closed</b> — it emits a named reason into the human Review Queue on the right, never a silent pass.</div>
+
+    <div class="legend">
+      <span class="lg"><span class="sw" style="background:#12283c;border-color:#2a4a68"></span>Input / source</span>
+      <span class="lg"><span class="sw" style="background:#3a2a10;border-color:#7a5716"></span>Probabilistic (model)</span>
+      <span class="lg"><span class="sw" style="background:#0f2233;border-color:#1c5a99"></span>Deterministic gate</span>
+      <span class="lg"><span class="sw" style="background:#2a1116;border-color:#7a2731"></span>Human gate</span>
+      <span class="lg"><span class="sw" style="background:#0f2a1c;border-color:#1c7a4a"></span>Proof / output</span>
+      <span class="lg"><span class="dot" style="background:var(--muted)"></span>Data store</span>
+      <span class="lg"><svg width="34" height="10"><line x1="0" y1="5" x2="30" y2="5" stroke="var(--red)" stroke-width="2.5" stroke-dasharray="3 4"/></svg>Fail-closed → review</span>
+    </div>
+
+    <svg viewBox="0 0 1560 1200" role="img" aria-label="Evidence pipeline diagram">
+      <defs>
+        <marker id="a-blue" markerWidth="12" markerHeight="12" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#1379fa"/></marker>
+        <marker id="a-red" markerWidth="12" markerHeight="12" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#ff4752"/></marker>
+        <marker id="a-mut" markerWidth="12" markerHeight="12" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#7f8ea3"/></marker>
+        <marker id="a-grn" markerWidth="12" markerHeight="12" refX="8" refY="4" orient="auto"><path d="M0,0 L9,4 L0,8 Z" fill="#19d16e"/></marker>
+      </defs>
+
+      <!-- ===== Review Queue rail (right) ===== -->
+      <rect x="1120" y="96" width="400" height="900" rx="18" fill="#160b0e" stroke="#5a2129"/>
+      <rect x="1120" y="96" width="400" height="44" rx="18" fill="#2a1116"/>
+      <text x="1144" y="124" class="rail-t">◎ REVIEW QUEUE — human gate</text>
+      <text x="1144" y="170" class="n-s" style="fill:#e7b8bc">Nothing is auto-approved or auto-rejected.</text>
+      <text x="1144" y="190" class="n-s" style="fill:#e7b8bc">Each named flag becomes a scheduled follow-up.</text>
+
+      <!-- reason chips (aligned to their source stage y) -->
+      <g>
+        <rect x="1144" y="250" width="352" height="34" rx="9" fill="#241016" stroke="#5a2129"/><text x="1162" y="272" class="chip">low-confidence</text>
+        <rect x="1144" y="330" width="352" height="34" rx="9" fill="#241016" stroke="#5a2129"/><text x="1162" y="352" class="chip">layout-no-table-headers</text>
+        <rect x="1144" y="432" width="352" height="34" rx="9" fill="#241016" stroke="#5a2129"/><text x="1162" y="454" class="chip">arithmetic-mismatch</text>
+        <rect x="1144" y="534" width="352" height="34" rx="9" fill="#241016" stroke="#5a2129"/><text x="1162" y="556" class="chip">ungrounded · weak-grounding</text>
+        <rect x="1144" y="636" width="352" height="34" rx="9" fill="#241016" stroke="#5a2129"/><text x="1162" y="658" class="chip">overcharge-flag · no-reference</text>
+        <rect x="1144" y="738" width="352" height="34" rx="9" fill="#241016" stroke="#5a2129"/><text x="1162" y="760" class="chip">market-overcharge-flag · market-no-reference</text>
+        <rect x="1144" y="840" width="352" height="34" rx="9" fill="#241016" stroke="#5a2129"/><text x="1162" y="862" class="chip">floor-veto  (taught rule + source)</text>
+      </g>
+      <text x="1144" y="928" class="n-s" style="fill:#c98b90">Every flag carries its evidence: the scan, the tokens, the reference, the taught rule — re-openable, not a black box.</text>
+
+      <!-- ===== main deterministic column ===== -->
+      <!-- helper: nodes at x=470 w=250, h=78, centers y listed -->
+      <!-- vertical connectors first (behind) -->
+      <g stroke="#1379fa" stroke-width="2.5" fill="none">
+        <line x1="595" y1="159" x2="595" y2="181" marker-end="url(#a-blue)"/>
+        <line x1="595" y1="261" x2="595" y2="283" marker-end="url(#a-blue)"/>
+        <line x1="595" y1="363" x2="595" y2="385" marker-end="url(#a-blue)"/>
+        <line x1="595" y1="465" x2="595" y2="487" marker-end="url(#a-blue)"/>
+        <line x1="595" y1="567" x2="595" y2="589" marker-end="url(#a-blue)"/>
+        <line x1="595" y1="669" x2="595" y2="691" marker-end="url(#a-blue)"/>
+        <line x1="595" y1="771" x2="595" y2="793" marker-end="url(#a-blue)"/>
+        <line x1="595" y1="873" x2="595" y2="895" marker-end="url(#a-blue)"/>
+      </g>
+
+      <!-- S1 Sources (input) -->
+      <g><rect x="470" y="120" width="250" height="78" rx="13" fill="#12283c" stroke="#2a4a68"/>
+        <text x="490" y="150" class="n-t">Sources</text>
+        <text x="490" y="172" class="n-s">PDF · scan · receipt · email export</text>
+        <text x="490" y="190" class="n-s">API/Zapier · legacy VM/RM bridge</text></g>
+      <!-- S2 OCR (prob) -->
+      <g><rect x="470" y="222" width="250" height="78" rx="13" fill="#3a2a10" stroke="#7a5716"/>
+        <rect x="470" y="222" width="250" height="22" rx="13" fill="#5c4212"/>
+        <text x="490" y="238" class="n-k" fill="#ffcf7a">◍ ONLY PROBABILISTIC STEP</text>
+        <text x="490" y="268" class="n-t">OCR</text>
+        <text x="490" y="290" class="n-s">Apple Vision / Tesseract → tokens+confidence</text></g>
+      <!-- S3 Layout -->
+      <g><rect x="470" y="324" width="250" height="78" rx="13" fill="#0f2233" stroke="#1c5a99"/>
+        <text x="490" y="354" class="n-t">Layout reconstruct</text>
+        <text x="490" y="376" class="n-s">deterministic table build, anchored to</text>
+        <text x="490" y="394" class="n-s">the invoice's own QTY/DESC/UNIT/TOTAL</text></g>
+      <!-- S4 Arithmetic -->
+      <g><rect x="470" y="426" width="250" height="78" rx="13" fill="#0f2233" stroke="#1c5a99"/>
+        <text x="490" y="456" class="n-t">Arithmetic gate</text>
+        <text x="490" y="478" class="n-s">qty × unit = total</text>
+        <text x="490" y="496" class="n-s">line items = stated invoice total</text></g>
+      <!-- S5 Grounding -->
+      <g><rect x="470" y="528" width="250" height="78" rx="13" fill="#0f2233" stroke="#1c5a99"/>
+        <text x="490" y="558" class="n-t">Grounding</text>
+        <text x="490" y="580" class="n-s">trace each number to a pixel box</text>
+        <text x="490" y="598" class="n-s">+ over-determine (independent witness)</text></g>
+      <!-- S6 Price check -->
+      <g><rect x="470" y="630" width="250" height="78" rx="13" fill="#0f2233" stroke="#1c5a99"/>
+        <text x="490" y="660" class="n-t">Price check</text>
+        <text x="490" y="682" class="n-s">vs the customer's OWN history (median);</text>
+        <text x="490" y="700" class="n-s">no history → flagged, never passed</text></g>
+      <!-- S7 Industry benchmark -->
+      <g><rect x="470" y="732" width="250" height="78" rx="13" fill="#0f2233" stroke="#1c5a99"/>
+        <text x="490" y="762" class="n-t">Industry benchmark</text>
+        <text x="490" y="784" class="n-s">paid vs kist-researched market price</text>
+        <text x="490" y="802" class="n-s">deterministic compare · overpay $</text></g>
+      <!-- S8 Floor -->
+      <g><rect x="470" y="834" width="250" height="78" rx="13" fill="#0f2233" stroke="#1c5a99"/>
+        <text x="490" y="864" class="n-t">Symbolic floor</text>
+        <text x="490" y="886" class="n-s">taught rules veto (mandatory</text>
+        <text x="490" y="904" class="n-s">source + evidence) — never abstains as a pass</text></g>
+      <!-- S9 Human gate -->
+      <g><rect x="470" y="936" width="250" height="78" rx="13" fill="#2a1116" stroke="#7a2731"/>
+        <text x="490" y="966" class="n-t" style="fill:#ffd9dc">Human gate</text>
+        <text x="490" y="988" class="n-s" style="fill:#e7b8bc">clean → reported clean</text>
+        <text x="490" y="1006" class="n-s" style="fill:#e7b8bc">any flag → a person decides</text></g>
+
+      <!-- fail-closed dashed arrows to rail (right edge x=720 → rail x=1120) -->
+      <g stroke="#ff4752" stroke-width="2" stroke-dasharray="3 5" fill="none">
+        <line x1="720" y1="267" x2="1120" y2="267" marker-end="url(#a-red)"/>
+        <line x1="720" y1="347" x2="1120" y2="347" marker-end="url(#a-red)"/>
+        <line x1="720" y1="449" x2="1120" y2="449" marker-end="url(#a-red)"/>
+        <line x1="720" y1="551" x2="1120" y2="551" marker-end="url(#a-red)"/>
+        <line x1="720" y1="653" x2="1120" y2="653" marker-end="url(#a-red)"/>
+        <line x1="720" y1="755" x2="1120" y2="755" marker-end="url(#a-red)"/>
+        <line x1="720" y1="857" x2="1120" y2="857" marker-end="url(#a-red)"/>
+      </g>
+
+      <!-- ===== left lane: kist research + data stores ===== -->
+      <!-- kist research callout feeding S7 -->
+      <g><rect x="60" y="700" width="360" height="118" rx="14" fill="#241a08" stroke="#7a5716"/>
+        <text x="82" y="728" class="n-k" fill="#ffcf7a">◍ kist --dig · RESEARCH (cross-model)</text>
+        <text x="82" y="754" class="n-s" style="fill:#e9d6a8">Asks EVERY reachable model the same</text>
+        <text x="82" y="772" class="n-s" style="fill:#e9d6a8">question, cross-compares → fair-market price.</text>
+        <text x="82" y="796" class="n-s" style="fill:#e9d6a8">Reference input only · provenance-hashed ·</text>
+        <text x="82" y="812" class="n-s" style="fill:#e9d6a8">fail-closed if unavailable (never invents).</text></g>
+      <path d="M420 762 C445 762, 448 771, 470 771" fill="none" stroke="#ff9e14" stroke-width="2.5" marker-end="url(#a-mut)"/>
+
+      <!-- store: customer price history → S6 -->
+      <g>
+        <ellipse cx="230" cy="592" rx="90" ry="14" fill="#0e1a26" stroke="#3a5674"/>
+        <path d="M140 592 L140 648 A90 14 0 0 0 320 648 L320 592" fill="#0e1a26" stroke="#3a5674"/>
+        <text x="230" y="628" text-anchor="middle" class="n-s" style="fill:#a9c2dd">Customer price</text>
+        <text x="230" y="646" text-anchor="middle" class="n-s" style="fill:#a9c2dd">history (Excel/SQL)</text>
+      </g>
+      <path d="M320 636 C400 636, 420 655, 470 655" fill="none" stroke="#7f8ea3" stroke-width="2" stroke-dasharray="2 5" marker-end="url(#a-mut)"/>
+
+      <!-- store: benchmark cache + sidecar (kist writes; feeds S7) -->
+      <g>
+        <ellipse cx="230" cy="862" rx="96" ry="14" fill="#0e1a26" stroke="#3a5674"/>
+        <path d="M134 862 L134 918 A96 14 0 0 0 326 918 L326 862" fill="#0e1a26" stroke="#3a5674"/>
+        <text x="230" y="898" text-anchor="middle" class="n-s" style="fill:#a9c2dd">Benchmark cache +</text>
+        <text x="230" y="916" text-anchor="middle" class="n-s" style="fill:#a9c2dd">provenance sidecar</text>
+      </g>
+      <path d="M240 848 C240 838, 240 828, 240 820" fill="none" stroke="#7f8ea3" stroke-width="2" stroke-dasharray="2 5" marker-end="url(#a-mut)"/>
+      <path d="M326 890 C400 890, 430 786, 470 786" fill="none" stroke="#7f8ea3" stroke-width="2" stroke-dasharray="2 5" marker-end="url(#a-mut)"/>
+
+      <!-- ===== proof row (bottom) ===== -->
+      <!-- S9 → receipt -->
+      <path d="M595 1014 C595 1040, 300 1040, 300 1064" fill="none" stroke="#19d16e" stroke-width="2.5" marker-end="url(#a-grn)"/>
+      <g><rect x="175" y="1066" width="250" height="86" rx="13" fill="#0f2a1c" stroke="#1c7a4a"/>
+        <text x="196" y="1096" class="n-t" style="fill:#c9f5dd">Signed receipt</text>
+        <text x="196" y="1118" class="n-s" style="fill:#a7d9bf">Ed25519 over canonical JSON;</text>
+        <text x="196" y="1136" class="n-s" style="fill:#a7d9bf">hashes every input that touched a verdict</text></g>
+      <line x1="425" y1="1109" x2="481" y2="1109" stroke="#19d16e" stroke-width="2.5" marker-end="url(#a-grn)"/>
+      <g><rect x="485" y="1066" width="250" height="86" rx="13" fill="#0f2a1c" stroke="#1c7a4a"/>
+        <text x="506" y="1096" class="n-t" style="fill:#c9f5dd">Verify</text>
+        <text x="506" y="1118" class="n-s" style="fill:#a7d9bf">re-checks signature + re-hashes</text>
+        <text x="506" y="1136" class="n-s" style="fill:#a7d9bf">scans, pricebook, benchmarks, rules</text></g>
+      <line x1="735" y1="1109" x2="791" y2="1109" stroke="#19d16e" stroke-width="2.5" marker-end="url(#a-grn)"/>
+      <g><rect x="795" y="1066" width="300" height="86" rx="13" fill="#0f2a1c" stroke="#1c7a4a"/>
+        <text x="816" y="1096" class="n-t" style="fill:#c9f5dd">Savings / value story</text>
+        <text x="816" y="1118" class="n-s" style="fill:#a7d9bf">$ overpay exposure (no double-count) ·</text>
+        <text x="816" y="1136" class="n-s" style="fill:#a7d9bf">flags · what you'd have missed · follow-ups</text></g>
+
+      <!-- store: SQLite evidence + receipts -->
+      <g>
+        <ellipse cx="1250" cy="1074" rx="120" ry="15" fill="#0e1a26" stroke="#3a5674"/>
+        <path d="M1130 1074 L1130 1130 A120 15 0 0 0 1370 1130 L1370 1074" fill="#0e1a26" stroke="#3a5674"/>
+        <text x="1250" y="1110" text-anchor="middle" class="n-s" style="fill:#a9c2dd">SQLite evidence store · signed receipts</text>
+      </g>
+      <path d="M1095 1109 C1110 1109, 1112 1104, 1128 1104" fill="none" stroke="#7f8ea3" stroke-width="2" stroke-dasharray="2 5" marker-end="url(#a-mut)"/>
+    </svg>
+  </div>
+
+  <div class="foot">
+    <span class="tag">PILOT-READY (deterministic path)</span>
+    <span class="tag" style="margin-left:8px">PROTOTYPE (live-kist research)</span>
+    &nbsp; Honest labeling: only the OCR + kist research steps are probabilistic; the industry-benchmark <i>comparison</i>, the arithmetic/grounding/floor gates, the receipt, and verify are deterministic and fail-closed. Diagram reflects the shipped engine (61/61 tests) — the live-kist research layer is proven against a fixture, not yet a live dig at scale.
+  </div>
+</div>
+</body>
+</html>
