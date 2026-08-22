@@ -1893,6 +1893,17 @@ def test_unhashable_invoice_file_is_harmless_under_index_keying():
     assert "invariant-missing:invoice-reconcile:0" in probs
 
 
+def test_hostile_unhashable_line_in_coverage_fails_closed_not_crash():
+    # MEDIUM (Codex r-gate 8): an unhashable scope.line (dict) must not raise on
+    # the coverage set-add — fail closed via the per-declaration loop.
+    r = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+         "invoices": [{"file": "a.png", "lines": [], "statedTotalReconciles": False}],
+         "expected": [{"id": "x", "kind": "line-arithmetic",
+                       "scope": {"invoiceIndex": 0, "line": {"bad": "dict"}}}]}
+    probs = check_invariants(r)                          # must not raise
+    assert "invariant-unresolvable:x" in probs
+
+
 def test_hostile_scope_without_index_fails_closed_not_crash():
     # MEDIUM (Codex r-gate 3): a scope missing/with a hostile invoiceIndex must
     # resolve to None and fail closed via the per-declaration loop, never crash.

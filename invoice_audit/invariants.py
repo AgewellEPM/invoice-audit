@@ -183,7 +183,13 @@ def _check_coverage(declared: list, invoices: list, problems: list) -> None:
         kind = d.get("kind")
         if kind == "invoice-reconcile":
             reconcile.add(idx)
-        elif kind == "line-arithmetic":
+            continue
+        # line-scoped: a hostile/unhashable `line` must not raise on set-add.
+        # Skip it here (leaving the real line uncovered -> named missing) while
+        # the per-declaration loop names the bad declaration unresolvable.
+        if not isinstance(line_key, int) or isinstance(line_key, bool):
+            continue
+        if kind == "line-arithmetic":
             arithmetic.add((idx, line_key))
         elif kind == "floor-max-unit-price":
             floor_max.add((idx, line_key))
