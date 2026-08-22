@@ -148,10 +148,16 @@ class Floor:
         """
         conflicts = []
         applied = False
+        max_caps: list[tuple[float, str]] = []  # (cap, source) for EVERY applied max rule
         for r in self._index.values():
             if not self._applies(r, line):
                 continue
             applied = True
+            if r.relation_type == "max_unit_price":
+                try:
+                    max_caps.append((float(r.object), r.source))
+                except (TypeError, ValueError):
+                    pass
             v = self._violation(r, line)
             if v:
                 conflicts.append({
@@ -159,8 +165,16 @@ class Floor:
                     "object": r.object, "source": r.source,
                     "evidence": r.evidence, "detail": v,
                 })
+        # The most restrictive taught max that applied — recorded on PASSING lines
+        # too, so the receipt can carry a floor invariant for EVERY covered line,
+        # not just vetoed ones (closes the coverage gap). See build_invariants.
+        applied_max = min(max_caps, key=lambda c: c[0]) if max_caps else None
+        applied_max_field = ({"object": applied_max[0], "source": applied_max[1]}
+                             if applied_max else None)
         if conflicts:
             return {"verdict": "contradiction", "veto": True,
-                    "conflicts": conflicts, "floor": FLOOR_SCHEMA}
+                    "conflicts": conflicts,
+                    "appliedMaxUnitPrice": applied_max_field, "floor": FLOOR_SCHEMA}
         return {"verdict": "consistent" if applied else "unknown",
-                "veto": False, "conflicts": [], "floor": FLOOR_SCHEMA}
+                "veto": False, "conflicts": [],
+                "appliedMaxUnitPrice": applied_max_field, "floor": FLOOR_SCHEMA}

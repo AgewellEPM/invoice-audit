@@ -119,10 +119,12 @@ def _verify(receipt: dict, *, rehash_inputs: bool = True) -> VerificationResult:
     for kind, path in hashed:
         by_kind.setdefault(kind, []).append(path)
     # Invariants are re-proven by the core only once the receipt is signed (an
-    # unsigned receipt short-circuits before them), so `proven` is honest: it is
-    # 0 for an unsigned body, and the full declared count once a signature exists.
+    # unsigned receipt short-circuits before them). `checked` is whether the core
+    # got to re-evaluate them; `held` is whether they ALL held — never claimed
+    # when any invariant-* problem was reported (no overclaim on a failure).
     declared = _safe_get(receipt, "expected")
     n_declared = len(declared) if isinstance(declared, list) else 0
+    any_invariant_problem = any(p.startswith("invariant-") for p in problems)
     provenance = {
         "schema": _safe_get(receipt, "schema"),
         "receiptGeneratedAt": _safe_get(receipt, "generatedAt"),
@@ -132,7 +134,8 @@ def _verify(receipt: dict, *, rehash_inputs: bool = True) -> VerificationResult:
         "invariants": {
             "version": _safe_get(receipt, "expectedVersion"),
             "declared": n_declared,
-            "proven": n_declared if signature_checked else 0,
+            "checked": signature_checked,
+            "held": signature_checked and not any_invariant_problem,
         },
     }
     if rehash_inputs:

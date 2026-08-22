@@ -1603,25 +1603,130 @@ def test_check_invariants_never_raises_on_hostile_expected():
     assert any(p.startswith("invariant-unresolvable") for p in probs)
 
 
-def test_no_expected_block_is_a_clean_pass_backward_compat():
-    # An older signed receipt without an `expected` block still verifies — the
-    # invariant layer is additive, never a new way to fail a valid old receipt.
+def test_older_schema_without_expected_is_backward_compat():
+    # An older (pre-invariants) schema without an `expected` block still passes —
+    # the invariant layer is additive, never a new way to fail a valid old receipt.
+    old = {"schema": "perslis.invoice-audit-receipt.v2",
+           "invoices": [{"file": "x.png", "lines": [], "statedTotalReconciles": False}]}
+    assert check_invariants(old) == []
+
+
+def test_contentless_current_receipt_needs_no_invariants():
+    # A current-schema receipt with no audited invoices has nothing to prove.
     r = sign_receipt({"schema": SCHEMA, "scans": [], "pricebook": {}})
     assert check_invariants(r) == []
     assert verify_receipt(r, rehash_inputs=False) == []
 
 
-def test_verify_primitive_provenance_reports_invariants_proven():
+def test_stripped_expected_block_fails_closed_not_bypassed():
+    # HIGH (Codex r-gate): a CURRENT-schema receipt WITH invoices but a stripped
+    # `expected` block must fail closed — invariants are not attacker-optional.
+    with_content = {"schema": SCHEMA,
+                    "invoices": [{"file": "a.png",
+                                  "lines": [{"qty": 1, "unit_price": 5.0, "line_total": 5.0}],
+                                  "statedTotalReconciles": False}]}
+    # expected entirely absent
+    assert "invariant-missing:expected-block-absent" in check_invariants(with_content)
+    # expected emptied to [] while invoices remain -> per-surface missing
+    emptied = {**with_content, "expected": []}
+    probs = check_invariants(emptied)
+    assert "invariant-missing:invoice-reconcile:a.png" in probs
+    assert "invariant-missing:line-arithmetic:a.png:0" in probs
+    # a single line's arithmetic invariant stripped -> that exact surface named
+    partial = {**with_content, "expected": [
+        {"id": "invoice-reconcile:a.png", "kind": "invoice-reconcile",
+         "scope": {"invoice": "a.png"}}]}
+    assert "invariant-missing:line-arithmetic:a.png:0" in check_invariants(partial)
+
+
+def test_floor_invariant_covers_passing_line_not_just_vetoed():
+    # HIGH (Codex r-gate): a line UNDER a taught max that PASSES must still carry a
+    # floor invariant, so it cannot be re-signed into an over-max line unnoticed.
+    # A generous "*" max means every line is covered AND passes.
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        scans = Path(d) / "scans"
+        shutil.copytree(DEMO / "scans", scans)
+        floor = Path(d) / "floor.json"
+        floor.write_text(json.dumps({
+            "schema": "invoice-audit.floor.v1",
+            "rules": [{"subject": "*", "relation_type": "max_unit_price",
+                       "object": "1000000.00", "source": "test",
+                       "evidence": "generous cap so every line passes"}]}))
+        r = audit_folder(scans, DEMO / "pricebook.csv", floor_path=floor)
+        passing = None
+        for inv in r["invoices"]:
+            for i, line in enumerate(inv["lines"]):
+                amp = (line.get("floor") or {}).get("appliedMaxUnitPrice")
+                vetoed = any(f.get("kind") == "floor-veto" and f.get("line") == i
+                             for f in inv["flags"])
+                if amp and not vetoed:
+                    passing = (inv["file"], i, amp["object"])
+        assert passing, "expected a passing line under the generous taught max"
+        file, idx, cap = passing
+        # That passing line must have a floor invariant declared.
+        assert any(e["kind"] == "floor-max-unit-price"
+                   and e["scope"] == {"invoice": file, "line": idx}
+                   for e in r["expected"])
+        # Re-sign it over the cap without adding a veto -> invariant catches it.
+        def over(body):
+            for inv in body["invoices"]:
+                if inv["file"] == file:
+                    inv["lines"][idx]["unit_price"] = round(cap + 10.0, 2)
+                    # keep arithmetic self-consistent so ONLY the floor invariant fires
+                    inv["lines"][idx]["line_total"] = round(
+                        inv["lines"][idx]["qty"] * (cap + 10.0), 2)
+        forged = _resign(r, over)
+        probs = verify_receipt(forged, rehash_inputs=False)
+        assert "receipt-signature-invalid" not in probs
+        assert f"invariant-violated:floor-max-unit-price:{file}:{idx}" in probs
+
+
+def test_invoice_reconcile_nonbool_recorded_fails_closed():
+    # MEDIUM (Codex r-gate): a missing/malformed statedTotalReconciles must fail
+    # closed to unresolvable, not let bool(None)==False silently pass.
+    r = {"schema": "perslis.invoice-audit-receipt.v2",
+         "invoices": [{"file": "a.png", "lines": [], "stated_total": None}],  # no reconcile key
+         "expected": [{"id": "invoice-reconcile:a.png", "kind": "invoice-reconcile",
+                       "scope": {"invoice": "a.png"}}]}
+    assert "invariant-unresolvable:invoice-reconcile:a.png" in check_invariants(r)
+
+
+def test_check_invariants_total_on_hostile_container_shapes():
+    # MEDIUM (Codex r-gate): None invoices / non-dict scope / non-list flags must
+    # never raise — fail closed to named reasons.
+    assert check_invariants({"expected": [], "invoices": None}) == []
+    r = {"schema": "perslis.invoice-audit-receipt.v2",
+         "invoices": [{"file": "a.png",
+                       "lines": [{"qty": 1, "unit_price": 5.0, "line_total": 5.0}],
+                       "flags": "not-a-list", "statedTotalReconciles": True,
+                       "stated_total": 5.0}],
+         "expected": [
+             {"id": "s", "kind": "line-arithmetic", "scope": "not-a-dict"},
+             {"id": "line-arithmetic:a.png:0", "kind": "line-arithmetic",
+              "scope": {"invoice": "a.png", "line": 0}},
+         ]}
+    probs = check_invariants(r)                                   # must not raise
+    assert "invariant-unresolvable:s" in probs                    # non-dict scope
+
+
+def test_verify_primitive_provenance_reports_invariants_held():
     r = _demo_receipt()
     res = verify_primitive(r, rehash_inputs=False)
     n = len(r["expected"])
-    assert res.provenance["invariants"]["declared"] == n
-    assert res.provenance["invariants"]["proven"] == n       # signed -> all proven
-    assert res.provenance["invariants"]["version"] == INVARIANTS_VERSION
-    # Unsigned short-circuits before invariants -> proven honestly 0.
+    iv = res.provenance["invariants"]
+    assert iv["declared"] == n
+    assert iv["checked"] is True and iv["held"] is True      # signed + all hold
+    assert iv["version"] == INVARIANTS_VERSION
+    # Unsigned short-circuits before invariants -> not checked, not held (honest).
     unsigned = {k: v for k, v in r.items() if k not in ("signature", "publicKey")}
     pv = verify_primitive(unsigned, rehash_inputs=False).provenance["invariants"]
-    assert pv["declared"] == n and pv["proven"] == 0
+    assert pv["declared"] == n and pv["checked"] is False and pv["held"] is False
+    # A re-signed tampered receipt is checked but does NOT hold — no overclaim.
+    forged = _resign(r, lambda b: b["invoices"][0]["lines"][0].__setitem__(
+        "line_total", round(b["invoices"][0]["lines"][0]["line_total"] + 9, 2)))
+    fv = verify_primitive(forged, rehash_inputs=False).provenance["invariants"]
+    assert fv["checked"] is True and fv["held"] is False
 
 
 if __name__ == "__main__":

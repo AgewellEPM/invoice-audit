@@ -12,8 +12,11 @@ AND re-signs passes the signature check; the invariant check catches them, becau
 the recorded verdict no longer matches a fresh deterministic recomputation.
 
 Every check here is deterministic and fail-closed with a NAMED reason. No ML.
-An invariant that references data the receipt no longer contains is a violation
-(`invariant-unresolvable:*`), never a crash and never a silent pass.
+Three failure shapes, never a crash and never a silent pass:
+  invariant-violated:<id>      — recomputation disagrees with the recorded verdict
+  invariant-unresolvable:<id>  — the receipt no longer holds the data to re-prove
+  invariant-missing:<...>      — a current-schema receipt is missing a declaration
+                                 it must carry (defends against a stripped block)
 """
 from __future__ import annotations
 
@@ -24,20 +27,25 @@ INVARIANTS_VERSION = "invoice-audit.invariants.v1"
 # the numbers; if that tolerance ever changes, it changes in lockstep here.
 CENT = 0.005
 
+# Receipt schemas that MUST carry an `expected` block. A receipt claiming one of
+# these but lacking invariants has been stripped — fail closed, don't wave it
+# through as if it were an older (pre-invariants) receipt. Declared locally to
+# avoid a receipt<->invariants import cycle; keep in sync with receipt.SCHEMA.
+_INVARIANT_SCHEMAS = frozenset({"perslis.invoice-audit-receipt.v3"})
+
 
 # ── declaration (audit time) ──────────────────────────────────────────────────
 
 def build_invariants(invoices: list[dict]) -> list[dict]:
     """Emit the invariant declarations for a set of audited invoices. Pure record
-    of relations that must hold — the operands are re-read from the receipt at
-    verify time, so nothing here is a second copy that could silently diverge
-    (the one exception is the floor `bound`, the taught max, which IS part of the
-    EXPECTED policy and so is declared explicitly)."""
+    of relations that must hold — line operands are re-read from the receipt at
+    verify time (no second copy that could diverge). The floor `bound` IS declared
+    explicitly: it is the taught policy max, part of EXPECTED, and is recorded for
+    every line a max rule covers (pass or veto), not only vetoed lines."""
     out: list[dict] = []
     for inv in invoices:
         file = inv.get("file")
-        # One per line: the recorded arithmetic verdict must match recomputation.
-        for i, _line in enumerate(inv.get("lines", [])):
+        for i, line in enumerate(inv.get("lines", [])):
             out.append({
                 "id": f"line-arithmetic:{file}:{i}",
                 "kind": "line-arithmetic",
@@ -45,8 +53,7 @@ def build_invariants(invoices: list[dict]) -> list[dict]:
                 "statement": "an arithmetic-mismatch flag exists for this line "
                              "iff line_total != round(qty * unit_price, 2)",
             })
-            # One per line that a taught max_unit_price rule actually vetoed.
-            bound = _recorded_floor_max(_line)
+            bound = _applied_floor_max(line)
             if bound is not None:
                 out.append({
                     "id": f"floor-max-unit-price:{file}:{i}",
@@ -57,7 +64,6 @@ def build_invariants(invoices: list[dict]) -> list[dict]:
                     "statement": "unit_price exceeds the taught max iff a "
                                  "floor-veto is recorded for this line",
                 })
-        # One per invoice: the recorded reconcile verdict must match recomputation.
         out.append({
             "id": f"invoice-reconcile:{file}",
             "kind": "invoice-reconcile",
@@ -72,22 +78,40 @@ def build_invariants(invoices: list[dict]) -> list[dict]:
 
 def check_invariants(receipt: dict) -> list[str]:
     """Re-prove every declared invariant against the receipt's recorded numbers.
-    Returns named problems; empty == all invariants hold. Never raises: a
-    malformed/absent reference fails closed to `invariant-unresolvable:<id>`."""
-    problems: list[str] = []
+    Returns named problems; empty == all invariants hold. Never raises: any
+    malformed/absent/stripped reference fails closed to a named reason."""
     if not isinstance(receipt, dict):
         return ["invariant-unresolvable:receipt-not-a-dict"]
+    problems: list[str] = []
+    invoices = receipt.get("invoices")
+    invoices = invoices if isinstance(invoices, list) else []
+    # A current-schema receipt with audited content MUST carry invariants that
+    # cover it. `requires` is False for a contentless receipt (nothing to prove)
+    # and for older (pre-invariants) schemas. This is what stops a strip-and-
+    # resign bypass while letting a genuinely empty receipt through.
+    requires = receipt.get("schema") in _INVARIANT_SCHEMAS and bool(invoices)
     declared = receipt.get("expected")
-    if not declared:
-        return problems  # no EXPECTED block → nothing to prove (older schema)
-    by_file = {inv.get("file"): inv
-               for inv in receipt.get("invoices", []) if isinstance(inv, dict)}
+    if declared is None:
+        return ["invariant-missing:expected-block-absent"] if requires else []
+    if not isinstance(declared, list):
+        return ["invariant-unresolvable:expected-not-a-list"]
 
-    for decl in declared if isinstance(declared, list) else []:
+    by_file = {inv.get("file"): inv for inv in invoices if isinstance(inv, dict)}
+
+    # Anti-strip: every invoice must be covered by a reconcile invariant and every
+    # line by an arithmetic one. A removed declaration is a stripped invariant.
+    if requires:
+        _check_coverage(declared, invoices, problems)
+
+    for decl in declared:
         if not isinstance(decl, dict):
             problems.append("invariant-unresolvable:malformed-declaration")
             continue
-        inv = by_file.get((decl.get("scope") or {}).get("invoice"))
+        scope = decl.get("scope")
+        if not isinstance(scope, dict):
+            problems.append(f"invariant-unresolvable:{decl.get('id')}")
+            continue
+        inv = by_file.get(scope.get("invoice"))
         if inv is None:
             problems.append(f"invariant-unresolvable:{decl.get('id')}")
             continue
@@ -101,6 +125,31 @@ def check_invariants(receipt: dict) -> list[str]:
         else:
             problems.append(f"invariant-unresolvable:{decl.get('id')}")
     return problems
+
+
+def _check_coverage(declared: list, invoices: list, problems: list) -> None:
+    """Every invoice needs a reconcile invariant; every line an arithmetic one.
+    A missing one means the block was stripped after audit — fail closed."""
+    reconcile = set()
+    arithmetic = set()
+    for d in declared:
+        if not isinstance(d, dict):
+            continue
+        scope = d.get("scope") if isinstance(d.get("scope"), dict) else {}
+        if d.get("kind") == "invoice-reconcile":
+            reconcile.add(scope.get("invoice"))
+        elif d.get("kind") == "line-arithmetic":
+            arithmetic.add((scope.get("invoice"), scope.get("line")))
+    for inv in invoices:
+        if not isinstance(inv, dict):
+            continue
+        file = inv.get("file")
+        if file not in reconcile:
+            problems.append(f"invariant-missing:invoice-reconcile:{file}")
+        lines = inv.get("lines")
+        for i in range(len(lines) if isinstance(lines, list) else 0):
+            if (file, i) not in arithmetic:
+                problems.append(f"invariant-missing:line-arithmetic:{file}:{i}")
 
 
 def _check_line_arithmetic(decl: dict, inv: dict, problems: list) -> None:
@@ -128,7 +177,10 @@ def _check_floor_max(decl: dict, inv: dict, problems: list) -> None:
         return
     idx = decl["scope"]["line"]
     try:
-        exceeds = _f(line["unit_price"]) > _f(decl["bound"]) + CENT
+        # Strict `>`, matching the producer (floor._violation). No CENT band:
+        # the floor vetoes on unit_price > cap exactly, so we must too or a veto
+        # in the half-cent band would falsely (mis)match.
+        exceeds = _f(line["unit_price"]) > _f(decl["bound"])
     except (KeyError, TypeError, ValueError):
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
@@ -139,9 +191,16 @@ def _check_floor_max(decl: dict, inv: dict, problems: list) -> None:
 
 
 def _check_invoice_reconcile(decl: dict, inv: dict, problems: list) -> None:
+    recorded = inv.get("statedTotalReconciles")
+    if not isinstance(recorded, bool):
+        # A missing/malformed recorded verdict cannot be re-proven — fail closed
+        # rather than let bool(None)==False silently pass a false recomputation.
+        problems.append(f"invariant-unresolvable:{decl.get('id')}")
+        return
     try:
         stated = inv.get("stated_total")
-        lines = inv.get("lines", [])
+        lines = inv.get("lines")
+        lines = lines if isinstance(lines, list) else []
         if stated is None:
             computed = False
         else:
@@ -150,8 +209,7 @@ def _check_invoice_reconcile(decl: dict, inv: dict, problems: list) -> None:
     except (KeyError, TypeError, ValueError):
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
-    recorded = inv.get("statedTotalReconciles")
-    if bool(recorded) != computed:
+    if recorded != computed:
         problems.append(f"invariant-violated:{decl.get('id')}")
 
 
@@ -166,29 +224,32 @@ def _f(x) -> float:
 
 def _line_at(inv: dict, decl: dict):
     idx = (decl.get("scope") or {}).get("line")
-    lines = inv.get("lines", [])
-    if not isinstance(idx, int) or not isinstance(lines, list) or not (0 <= idx < len(lines)):
+    lines = inv.get("lines")
+    if not isinstance(idx, int) or isinstance(idx, bool) or not isinstance(lines, list):
+        return None
+    if not (0 <= idx < len(lines)):
         return None
     line = lines[idx]
     return line if isinstance(line, dict) else None
 
 
 def _has_flag(inv: dict, kind: str, line_idx: int) -> bool:
-    for f in inv.get("flags", []) or []:
+    flags = inv.get("flags")
+    for f in flags if isinstance(flags, list) else []:
         if isinstance(f, dict) and f.get("kind") == kind and f.get("line") == line_idx:
             return True
     return False
 
 
-def _recorded_floor_max(line: dict):
-    """Return (max_value, source) if this line has a taught max_unit_price veto
-    recorded, else None. The bound is only present on lines the floor vetoed —
-    a known limit: clean lines carry no floor invariant (see the doc)."""
+def _applied_floor_max(line: dict):
+    """Return (max_value, source) for the taught max that covers this line — from
+    the floor's `appliedMaxUnitPrice`, which is recorded on passing lines too
+    (floor.check_line), so coverage is complete. None when no max rule applied."""
     floor = line.get("floor") if isinstance(line, dict) else None
-    for c in (floor or {}).get("conflicts", []) or []:
-        if isinstance(c, dict) and c.get("relation_type") == "max_unit_price":
-            try:
-                return (float(c["object"]), c.get("source"))
-            except (KeyError, TypeError, ValueError):
-                return None
+    field = (floor or {}).get("appliedMaxUnitPrice") if isinstance(floor, dict) else None
+    if isinstance(field, dict):
+        try:
+            return (float(field["object"]), field.get("source"))
+        except (KeyError, TypeError, ValueError):
+            return None
     return None
