@@ -1526,12 +1526,24 @@ def _demo_receipt():
                             floor_path=DEMO / "floor-rules.json")
 
 
+def _totals_for(invoices, review=None):
+    """A totals dict consistent with hand-built invoices (lines carry no
+    delta_total/market/floor, so the money totals are 0)."""
+    return {"invoices": len(invoices),
+            "linesChecked": sum(len(i.get("lines", [])) for i in invoices),
+            "flagged": len(review or []),
+            "potentialOverchargeUSD": 0.0,
+            "marketOverchargeUSD": 0.0,
+            "policyOverageUSD": 0.0}
+
+
 def test_audit_emits_expected_invariants_and_they_all_hold():
     r = _demo_receipt()
     assert r["schema"] == "perslis.invoice-audit-receipt.v3"
     assert r["expectedVersion"] == INVARIANTS_VERSION
     kinds = {e["kind"] for e in r["expected"]}
-    assert kinds == {"line-arithmetic", "invoice-reconcile", "floor-max-unit-price"}
+    assert kinds == {"line-arithmetic", "invoice-reconcile",
+                     "floor-max-unit-price", "totals-consistency"}
     # A freshly-audited receipt's own invariants must all hold (self-consistent).
     assert check_invariants(r) == []
     assert verify_receipt(r, rehash_inputs=False) == []
@@ -1893,7 +1905,7 @@ def test_duplicate_invoice_file_masks_nothing_by_positional_index():
              "lines": [{"qty": 1, "unit_price": 10.0, "line_total": 10.0}], "flags": []}
     r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
                       "scans": [], "pricebook": {},
-                      "invoices": [tampered, clean],
+                      "invoices": [tampered, clean], "totals": _totals_for([tampered, clean]),
                       "expected": build_invariants([tampered, clean])})
     probs = verify_receipt(r, rehash_inputs=False)
     # invoices[0] claims reconcile but 10 != 999 -> its own invariant catches it.
@@ -1910,7 +1922,7 @@ def test_two_distinct_invoices_sharing_a_basename_verify_clean():
     b = {"file": "page-001.png", "stated_total": 20.0, "statedTotalReconciles": True,
          "lines": [{"qty": 2, "unit_price": 10.0, "line_total": 20.0}], "flags": []}
     r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
-                      "scans": [], "pricebook": {}, "invoices": [a, b],
+                      "scans": [], "pricebook": {}, "invoices": [a, b], "totals": _totals_for([a, b]),
                       "expected": build_invariants([a, b])})
     assert verify_receipt(r, rehash_inputs=False) == []       # no false collision
 
@@ -1925,6 +1937,32 @@ def test_unhashable_invoice_file_is_harmless_under_index_keying():
     assert "invariant-missing:invoice-reconcile:0" in probs
 
 
+def test_totals_tamper_caught_by_recomputation():
+    # HIGH (Codex r-gate 13): the headline totals are re-derived from the pinned
+    # invoices, so a re-signed potentialOverchargeUSD tamper is caught.
+    r = _demo_receipt()
+    assert r["totals"]["potentialOverchargeUSD"] > 0
+    assert verify_receipt(r, rehash_inputs=False) == []
+    forged = _resign(r, lambda b: b["totals"].__setitem__("potentialOverchargeUSD", 0.0))
+    probs = verify_receipt(forged, rehash_inputs=False)
+    assert "receipt-signature-invalid" not in probs
+    assert "invariant-violated:totals-consistency" in probs
+    # A count tamper is caught too (exact int).
+    forged2 = _resign(r, lambda b: b["totals"].__setitem__("flagged", 0))
+    assert "invariant-violated:totals-consistency" in verify_receipt(forged2, rehash_inputs=False)
+
+
+def test_stripped_totals_declaration_named_missing():
+    # HIGH (Codex r-gate 13): dropping the totals-consistency declaration must be
+    # named missing, not silently uncovered.
+    r = _demo_receipt()
+    def strip(body):
+        body["expected"] = [e for e in body["expected"]
+                            if e.get("kind") != "totals-consistency"]
+    forged = _resign(r, strip)
+    assert "invariant-missing:totals-consistency" in verify_receipt(forged, rehash_inputs=False)
+
+
 def test_operand_pin_is_exact_catches_subcent_tamper():
     # HIGH (Codex r-gate 11): the pin is EXACT, not within-CENT. A sub-cent
     # single-field tamper on a flagged line must still be caught.
@@ -1932,7 +1970,7 @@ def test_operand_pin_is_exact_catches_subcent_tamper():
            "lines": [{"qty": 2.0, "unit_price": 10.0, "line_total": 25.0}],
            "flags": [{"kind": "arithmetic-mismatch", "line": 0}]}
     r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
-                      "scans": [], "pricebook": {}, "invoices": [inv],
+                      "scans": [], "pricebook": {}, "invoices": [inv], "totals": _totals_for([inv]),
                       "expected": build_invariants([inv])})
     assert verify_receipt(r, rehash_inputs=False) == []
     # qty tamper of 0.004 — within the old CENT band, must now be caught.
@@ -1950,7 +1988,7 @@ def test_operand_pin_catches_tamper_on_already_flagged_line():
            "lines": [{"qty": 2.0, "unit_price": 10.0, "line_total": 25.0}],  # 20 != 25 -> flagged
            "flags": [{"kind": "arithmetic-mismatch", "line": 0}]}
     r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
-                      "scans": [], "pricebook": {}, "invoices": [inv],
+                      "scans": [], "pricebook": {}, "invoices": [inv], "totals": _totals_for([inv]),
                       "expected": build_invariants([inv])})
     assert verify_receipt(r, rehash_inputs=False) == []
     # Change the flagged line's total 25 -> 30 (still mismatched) and re-sign.
@@ -1966,7 +2004,7 @@ def test_reconcile_pin_catches_tamper_on_nonreconciling_invoice():
     inv = {"file": "a.png", "stated_total": 999.0, "statedTotalReconciles": False,
            "lines": [{"qty": 1.0, "unit_price": 10.0, "line_total": 10.0}], "flags": []}
     r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
-                      "scans": [], "pricebook": {}, "invoices": [inv],
+                      "scans": [], "pricebook": {}, "invoices": [inv], "totals": _totals_for([inv]),
                       "expected": build_invariants([inv])})
     assert verify_receipt(r, rehash_inputs=False) == []
     forged = _resign(r, lambda b: b["invoices"][0].__setitem__("stated_total", 888.0))

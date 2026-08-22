@@ -84,6 +84,17 @@ def build_invariants(invoices: list[dict]) -> list[dict]:
                          "statedTotalReconciles == (stated_total present and "
                          "round(sum(line_total), 2) within a cent of it)",
         })
+    # One per receipt: the headline totals (counts + money) must be re-derivable
+    # from the (pinned) invoices/reviewQueue, so a re-signed totals tamper — e.g.
+    # zeroing potentialOverchargeUSD — is caught.
+    out.append({
+        "id": "totals-consistency",
+        "kind": "totals-consistency",
+        "scope": {},
+        "statement": "totals.{invoices,linesChecked,flagged} and the money totals "
+                     "(potential/market/policy overcharge) equal a fresh "
+                     "recomputation from the invoices and reviewQueue",
+    })
     return out
 
 
@@ -127,6 +138,10 @@ def check_invariants(receipt: dict) -> list[str]:
     for decl in declared:
         if not isinstance(decl, dict):
             problems.append("invariant-unresolvable:malformed-declaration")
+            continue
+        # Receipt-scoped (not invoice-scoped): recompute the totals from invoices.
+        if decl.get("kind") == "totals-consistency":
+            _check_totals(decl, receipt, invoices, problems)
             continue
         inv = _resolve_invoice(decl, invoices)
         if inv is None:
@@ -181,8 +196,12 @@ def _check_coverage(declared: list, invoices: list, problems: list) -> None:
     reconcile = set()
     arithmetic = set()
     floor_max = set()
+    has_totals = False
     for d in declared:
         if not isinstance(d, dict):
+            continue
+        if d.get("kind") == "totals-consistency":
+            has_totals = True
             continue
         scope = d.get("scope") if isinstance(d.get("scope"), dict) else {}
         idx = scope.get("invoiceIndex")
@@ -215,6 +234,69 @@ def _check_coverage(declared: list, invoices: list, problems: list) -> None:
             # else a stripped floor declaration would bypass verification.
             if _applied_floor_max(line) is not None and (idx, i) not in floor_max:
                 problems.append(f"invariant-missing:floor-max-unit-price:{idx}:{i}")
+    if not has_totals:
+        problems.append("invariant-missing:totals-consistency")
+
+
+def _f0(x) -> float:
+    """Coerce a recorded money field, treating a missing value as 0.0."""
+    return 0.0 if x is None else _f(x)
+
+
+def _check_totals(decl: dict, receipt: dict, invoices: list, problems: list) -> None:
+    """Recompute the headline totals from the (pinned) invoices + reviewQueue and
+    compare to the recorded totals. Counts are exact ints; money totals are exact
+    after rounding to the cent (matching audit.py). A single-field totals tamper
+    (e.g. zeroing potentialOverchargeUSD) breaks this without also forging every
+    contributing line — the documented consistent-forgery residual."""
+    totals = receipt.get("totals")
+    if not isinstance(totals, dict):
+        problems.append(f"invariant-unresolvable:{decl.get('id')}")
+        return
+    review = receipt.get("reviewQueue")
+    review = review if isinstance(review, list) else []
+    try:
+        n_invoices = len(invoices)
+        lines_checked = 0
+        potential = market = policy = 0.0
+        for inv in invoices:
+            if not isinstance(inv, dict):
+                continue
+            lines = inv.get("lines")
+            for line in lines if isinstance(lines, list) else []:
+                if not isinstance(line, dict):
+                    continue
+                lines_checked += 1
+                potential += _f0(line.get("delta_total"))
+                mk = line.get("market")
+                if isinstance(mk, dict) and mk.get("verdict") == "overcharge-flag":
+                    market += _f0(mk.get("delta_total"))
+                floor = line.get("floor")
+                if isinstance(floor, dict):
+                    for c in floor.get("conflicts") or []:
+                        if isinstance(c, dict) and c.get("relation_type") == "max_unit_price":
+                            policy += _f0(line.get("policy_delta_total"))
+        expected_counts = {"invoices": n_invoices,
+                           "linesChecked": lines_checked,
+                           "flagged": len(review)}
+        expected_money = {"potentialOverchargeUSD": round(potential, 2),
+                          "marketOverchargeUSD": round(market, 2),
+                          "policyOverageUSD": round(policy, 2)}
+    except (KeyError, TypeError, ValueError, OverflowError):
+        problems.append(f"invariant-unresolvable:{decl.get('id')}")
+        return
+    for key, val in expected_counts.items():
+        if totals.get(key) != val:                       # exact int
+            problems.append(f"invariant-violated:{decl.get('id')}")
+            return
+    for key, val in expected_money.items():
+        try:
+            if round(_f(totals.get(key)), 2) != val:     # exact after cent-round
+                problems.append(f"invariant-violated:{decl.get('id')}")
+                return
+        except (TypeError, ValueError, OverflowError):
+            problems.append(f"invariant-unresolvable:{decl.get('id')}")
+            return
 
 
 def _check_line_arithmetic(decl: dict, inv: dict, problems: list) -> None:
