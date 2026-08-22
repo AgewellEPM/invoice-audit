@@ -1558,7 +1558,7 @@ def test_invariant_invoice_reconcile_catches_resigned_tamper():
     forged = _resign(r, flip)
     probs = verify_receipt(forged, rehash_inputs=False)
     assert "receipt-signature-invalid" not in probs
-    assert f"invariant-violated:invoice-reconcile:{target}" in probs
+    assert "invariant-violated:invoice-reconcile:0" in probs   # invoices[0]
 
 
 def test_invariant_floor_max_catches_suppressed_veto():
@@ -1583,13 +1583,13 @@ def test_invariant_unresolvable_when_declaration_references_missing_invoice():
     r = sign_receipt({
         "schema": SCHEMA, "scans": [], "pricebook": {},
         "invoices": [],
-        "expected": [{"id": "line-arithmetic:ghost.png:0", "kind": "line-arithmetic",
-                      "scope": {"invoice": "ghost.png", "line": 0},
+        "expected": [{"id": "line-arithmetic:0:0", "kind": "line-arithmetic",
+                      "scope": {"invoiceIndex": 0, "invoice": "ghost.png", "line": 0},
                       "statement": "..."}],
         "expectedVersion": INVARIANTS_VERSION,
     })
     probs = verify_receipt(r, rehash_inputs=False)
-    assert "invariant-unresolvable:line-arithmetic:ghost.png:0" in probs
+    assert "invariant-unresolvable:line-arithmetic:0:0" in probs   # index out of range
 
 
 def test_check_invariants_never_raises_on_hostile_expected():
@@ -1627,16 +1627,16 @@ def test_stripped_expected_block_fails_closed_not_bypassed():
                                   "statedTotalReconciles": False}]}
     # expected entirely absent
     assert "invariant-missing:expected-block-absent" in check_invariants(with_content)
-    # expected emptied to [] while invoices remain -> per-surface missing
+    # expected emptied to [] while invoices remain -> per-surface missing (by index)
     emptied = {**with_content, "expected": []}
     probs = check_invariants(emptied)
-    assert "invariant-missing:invoice-reconcile:a.png" in probs
-    assert "invariant-missing:line-arithmetic:a.png:0" in probs
+    assert "invariant-missing:invoice-reconcile:0" in probs
+    assert "invariant-missing:line-arithmetic:0:0" in probs
     # a single line's arithmetic invariant stripped -> that exact surface named
     partial = {**with_content, "expected": [
-        {"id": "invoice-reconcile:a.png", "kind": "invoice-reconcile",
-         "scope": {"invoice": "a.png"}}]}
-    assert "invariant-missing:line-arithmetic:a.png:0" in check_invariants(partial)
+        {"id": "invoice-reconcile:0", "kind": "invoice-reconcile",
+         "scope": {"invoiceIndex": 0, "invoice": "a.png"}}]}
+    assert "invariant-missing:line-arithmetic:0:0" in check_invariants(partial)
 
 
 def test_floor_invariant_covers_passing_line_not_just_vetoed():
@@ -1655,31 +1655,30 @@ def test_floor_invariant_covers_passing_line_not_just_vetoed():
                        "evidence": "generous cap so every line passes"}]}))
         r = audit_folder(scans, DEMO / "pricebook.csv", floor_path=floor)
         passing = None
-        for inv in r["invoices"]:
+        for inv_i, inv in enumerate(r["invoices"]):
             for i, line in enumerate(inv["lines"]):
                 amp = (line.get("floor") or {}).get("appliedMaxUnitPrice")
                 vetoed = any(f.get("kind") == "floor-veto" and f.get("line") == i
                              for f in inv["flags"])
                 if amp and not vetoed:
-                    passing = (inv["file"], i, amp["object"])
+                    passing = (inv_i, i, amp["object"])
         assert passing, "expected a passing line under the generous taught max"
-        file, idx, cap = passing
-        # That passing line must have a floor invariant declared.
+        inv_i, idx, cap = passing
+        # That passing line must have a floor invariant declared (by index).
         assert any(e["kind"] == "floor-max-unit-price"
-                   and e["scope"] == {"invoice": file, "line": idx}
+                   and e["scope"]["invoiceIndex"] == inv_i
+                   and e["scope"]["line"] == idx
                    for e in r["expected"])
         # Re-sign it over the cap without adding a veto -> invariant catches it.
         def over(body):
-            for inv in body["invoices"]:
-                if inv["file"] == file:
-                    inv["lines"][idx]["unit_price"] = round(cap + 10.0, 2)
-                    # keep arithmetic self-consistent so ONLY the floor invariant fires
-                    inv["lines"][idx]["line_total"] = round(
-                        inv["lines"][idx]["qty"] * (cap + 10.0), 2)
+            line = body["invoices"][inv_i]["lines"][idx]
+            line["unit_price"] = round(cap + 10.0, 2)
+            # keep arithmetic self-consistent so ONLY the floor invariant fires
+            line["line_total"] = round(line["qty"] * (cap + 10.0), 2)
         forged = _resign(r, over)
         probs = verify_receipt(forged, rehash_inputs=False)
         assert "receipt-signature-invalid" not in probs
-        assert f"invariant-violated:floor-max-unit-price:{file}:{idx}" in probs
+        assert f"invariant-violated:floor-max-unit-price:{inv_i}:{idx}" in probs
 
 
 def test_invoice_reconcile_nonbool_recorded_fails_closed():
@@ -1687,9 +1686,9 @@ def test_invoice_reconcile_nonbool_recorded_fails_closed():
     # closed to unresolvable, not let bool(None)==False silently pass.
     r = {"schema": "perslis.invoice-audit-receipt.v2",
          "invoices": [{"file": "a.png", "lines": [], "stated_total": None}],  # no reconcile key
-         "expected": [{"id": "invoice-reconcile:a.png", "kind": "invoice-reconcile",
-                       "scope": {"invoice": "a.png"}}]}
-    assert "invariant-unresolvable:invoice-reconcile:a.png" in check_invariants(r)
+         "expected": [{"id": "invoice-reconcile:0", "kind": "invoice-reconcile",
+                       "scope": {"invoiceIndex": 0, "invoice": "a.png"}}]}
+    assert "invariant-unresolvable:invoice-reconcile:0" in check_invariants(r)
 
 
 def test_check_invariants_total_on_hostile_container_shapes():
@@ -1703,10 +1702,10 @@ def test_check_invariants_total_on_hostile_container_shapes():
                        "stated_total": 5.0}],
          "expected": [
              {"id": "s", "kind": "line-arithmetic", "scope": "not-a-dict"},
-             {"id": "line-arithmetic:a.png:0", "kind": "line-arithmetic",
-              "scope": {"invoice": "a.png", "line": 0}},
+             {"id": "line-arithmetic:0:0", "kind": "line-arithmetic",
+              "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0}},
          ]}
-    probs = check_invariants(r)                                   # must not raise
+    probs = check_invariants(r)                                   # must not raise (flags not-a-list)
     assert "invariant-unresolvable:s" in probs                    # non-dict scope
 
 
@@ -1729,13 +1728,13 @@ def test_stripped_floor_declaration_named_missing():
     r = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
          "invoices": [{"file": "a.png", "lines": [line], "statedTotalReconciles": False}],
          "expected": [
-             {"id": "line-arithmetic:a.png:0", "kind": "line-arithmetic",
-              "scope": {"invoice": "a.png", "line": 0}},
-             {"id": "invoice-reconcile:a.png", "kind": "invoice-reconcile",
-              "scope": {"invoice": "a.png"}},
+             {"id": "line-arithmetic:0:0", "kind": "line-arithmetic",
+              "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0}},
+             {"id": "invoice-reconcile:0", "kind": "invoice-reconcile",
+              "scope": {"invoiceIndex": 0, "invoice": "a.png"}},
              # floor-max-unit-price deliberately omitted
          ]}
-    assert "invariant-missing:floor-max-unit-price:a.png:0" in check_invariants(r)
+    assert "invariant-missing:floor-max-unit-price:0:0" in check_invariants(r)
 
 
 def test_floor_invariant_matches_max_veto_only_not_other_relations():
@@ -1743,8 +1742,8 @@ def test_floor_invariant_matches_max_veto_only_not_other_relations():
     # must not be read as the max veto.
     covered = {"qty": 1, "unit_price": 50.0, "line_total": 50.0,   # 50 <= 60: passes max
                "floor": {"appliedMaxUnitPrice": {"object": 60.0, "source": "ops"}}}
-    decl = [{"id": "floor-max-unit-price:a.png:0", "kind": "floor-max-unit-price",
-             "scope": {"invoice": "a.png", "line": 0}, "bound": 60.0}]
+    decl = [{"id": "floor-max-unit-price:0:0", "kind": "floor-max-unit-price",
+             "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0}, "bound": 60.0}]
     # v2 schema so coverage strictness doesn't demand the other declarations.
     holds = {"schema": "perslis.invoice-audit-receipt.v2",
              "invoices": [{"file": "a.png", "lines": [covered],
@@ -1761,7 +1760,7 @@ def test_floor_invariant_matches_max_veto_only_not_other_relations():
                             "flags": [{"kind": "floor-veto", "line": 0,
                                        "relation_type": "qty_integer"}]}],
               "expected": decl}
-    assert "invariant-violated:floor-max-unit-price:a.png:0" in check_invariants(forged)
+    assert "invariant-violated:floor-max-unit-price:0:0" in check_invariants(forged)
 
 
 def test_flag_bool_line_index_not_counted_as_line_zero():
@@ -1773,9 +1772,9 @@ def test_flag_bool_line_index_not_counted_as_line_zero():
          "invoices": [{"file": "a.png", "lines": [line],
                        "statedTotalReconciles": False,
                        "flags": [{"kind": "arithmetic-mismatch", "line": False}]}],
-         "expected": [{"id": "line-arithmetic:a.png:0", "kind": "line-arithmetic",
-                       "scope": {"invoice": "a.png", "line": 0}}]}
-    assert "invariant-violated:line-arithmetic:a.png:0" in check_invariants(r)
+         "expected": [{"id": "line-arithmetic:0:0", "kind": "line-arithmetic",
+                       "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0}}]}
+    assert "invariant-violated:line-arithmetic:0:0" in check_invariants(r)
 
 
 def test_verify_primitive_provenance_reports_invariants_held():
@@ -1820,11 +1819,11 @@ def test_floor_forged_high_bound_does_not_beat_line_cap():
     r = {"schema": "perslis.invoice-audit-receipt.v2",
          "invoices": [{"file": "a.png", "lines": [over],
                        "statedTotalReconciles": False, "flags": []}],
-         "expected": [{"id": "floor-max-unit-price:a.png:0",
+         "expected": [{"id": "floor-max-unit-price:0:0",
                        "kind": "floor-max-unit-price",
-                       "scope": {"invoice": "a.png", "line": 0},
+                       "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0},
                        "bound": 999999.0}]}   # forged high cap
-    assert "invariant-violated:floor-max-unit-price:a.png:0" in check_invariants(r)
+    assert "invariant-violated:floor-max-unit-price:0:0" in check_invariants(r)
 
 
 def test_floor_absent_bound_fails_closed_not_skipped():
@@ -1836,10 +1835,10 @@ def test_floor_absent_bound_fails_closed_not_skipped():
     r = {"schema": "perslis.invoice-audit-receipt.v2",
          "invoices": [{"file": "a.png", "lines": [over],
                        "statedTotalReconciles": False, "flags": []}],
-         "expected": [{"id": "floor-max-unit-price:a.png:0",
+         "expected": [{"id": "floor-max-unit-price:0:0",
                        "kind": "floor-max-unit-price",
-                       "scope": {"invoice": "a.png", "line": 0}}]}  # no bound
-    assert "invariant-unresolvable:floor-max-unit-price:a.png:0" in check_invariants(r)
+                       "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0}}]}  # no bound
+    assert "invariant-unresolvable:floor-max-unit-price:0:0" in check_invariants(r)
 
 
 def test_unknown_invariants_version_fails_closed():
@@ -1852,9 +1851,10 @@ def test_unknown_invariants_version_fails_closed():
     assert any(p.startswith("invariant-unresolvable:expected-version") for p in probs)
 
 
-def test_duplicate_invoice_file_masks_nothing_fails_closed():
-    # HIGH (Codex r-gate 6): two invoices sharing a filename must not let the last
-    # silently mask a tampered earlier one — fail closed on the collision.
+def test_duplicate_invoice_file_masks_nothing_by_positional_index():
+    # HIGH (Codex r-gate 6/7): two invoices sharing a filename must not let one
+    # mask the other. Positional (index) addressing makes filename collisions a
+    # non-issue: invoices[0] (tampered) keeps its OWN invariants and is caught.
     tampered = {"file": "dup.png", "stated_total": 999.0, "statedTotalReconciles": True,
                 "lines": [{"qty": 1, "unit_price": 10.0, "line_total": 10.0}], "flags": []}
     clean = {"file": "dup.png", "stated_total": 10.0, "statedTotalReconciles": True,
@@ -1864,28 +1864,42 @@ def test_duplicate_invoice_file_masks_nothing_fails_closed():
                       "invoices": [tampered, clean],
                       "expected": build_invariants([tampered, clean])})
     probs = verify_receipt(r, rehash_inputs=False)
-    assert "invariant-unresolvable:duplicate-invoice-file:dup.png" in probs
-    # And it is NOT a clean pass (the tampered invoice is not masked away).
+    # invoices[0] claims reconcile but 10 != 999 -> its own invariant catches it.
+    assert "invariant-violated:invoice-reconcile:0" in probs
     assert not verify_primitive(r, rehash_inputs=False).ok
 
 
-def test_unhashable_invoice_file_key_fails_closed_not_crash():
-    # MEDIUM (Codex r-gate 5): an unhashable invoice `file` must not crash the
-    # by_file build or the coverage `in` tests — fail closed to a named reason.
+def test_two_distinct_invoices_sharing_a_basename_verify_clean():
+    # r-gate 7 regression guard: distinct invoices with the SAME basename (e.g.
+    # page-001.png from two PDFs) must verify clean — index addressing means the
+    # shared basename is harmless, not a false collision.
+    a = {"file": "page-001.png", "stated_total": 10.0, "statedTotalReconciles": True,
+         "lines": [{"qty": 1, "unit_price": 10.0, "line_total": 10.0}], "flags": []}
+    b = {"file": "page-001.png", "stated_total": 20.0, "statedTotalReconciles": True,
+         "lines": [{"qty": 2, "unit_price": 10.0, "line_total": 20.0}], "flags": []}
+    r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+                      "scans": [], "pricebook": {}, "invoices": [a, b],
+                      "expected": build_invariants([a, b])})
+    assert verify_receipt(r, rehash_inputs=False) == []       # no false collision
+
+
+def test_unhashable_invoice_file_is_harmless_under_index_keying():
+    # r-gate 5/7: an unhashable invoice `file` is never a key now (index keying),
+    # so it cannot crash. The empty `expected` is what fails closed, by index.
     r = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
          "invoices": [{"file": {"unhashable": "dict"}, "lines": []}],
          "expected": []}
     probs = check_invariants(r)                          # must not raise
-    assert "invariant-unresolvable:malformed-invoice-file" in probs
+    assert "invariant-missing:invoice-reconcile:0" in probs
 
 
-def test_unhashable_scope_value_fails_closed_not_crash():
-    # MEDIUM (Codex r-gate 3): a hostile unhashable scope value must not crash the
-    # coverage set-build; it fails closed via the per-declaration loop.
+def test_hostile_scope_without_index_fails_closed_not_crash():
+    # MEDIUM (Codex r-gate 3): a scope missing/with a hostile invoiceIndex must
+    # resolve to None and fail closed via the per-declaration loop, never crash.
     r = {"schema": "perslis.invoice-audit-receipt.v2",
          "invoices": [{"file": "a.png", "lines": [], "statedTotalReconciles": False}],
          "expected": [{"id": "x", "kind": "line-arithmetic",
-                       "scope": {"invoice": {"nested": "dict"}, "line": 0}}]}
+                       "scope": {"invoice": {"nested": "dict"}, "line": 0}}]}  # no index
     probs = check_invariants(r)                          # must not raise
     assert "invariant-unresolvable:x" in probs
 
@@ -1901,9 +1915,10 @@ def test_floor_veto_detail_fallback_when_relation_type_absent():
                        "flags": [{"kind": "floor-veto", "line": 0,
                                   "detail": "unit 100 exceeds taught max 60 "
                                             "[max_unit_price src=ops]"}]}],
-         "expected": [{"id": "floor-max-unit-price:a.png:0",
+         "expected": [{"id": "floor-max-unit-price:0:0",
                        "kind": "floor-max-unit-price",
-                       "scope": {"invoice": "a.png", "line": 0}, "bound": 60.0}]}
+                       "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0},
+                       "bound": 60.0}]}
     # exceeds (100>60) True and the veto is matched via detail -> holds, no flag.
     assert not any("floor-max" in p for p in check_invariants(r))
 

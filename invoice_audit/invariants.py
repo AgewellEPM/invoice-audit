@@ -43,31 +43,35 @@ def build_invariants(invoices: list[dict]) -> list[dict]:
     explicitly: it is the taught policy max, part of EXPECTED, and is recorded for
     every line a max rule covers (pass or veto), not only vetoed lines."""
     out: list[dict] = []
-    for inv in invoices:
+    # Invoices are addressed POSITIONALLY (invoiceIndex), not by filename: a
+    # filename is only a label and two distinct scans can legitimately share a
+    # basename (e.g. page-001.png from two PDFs). The index is the invoice's stable
+    # identity in the signed list, so no collision can mask or misroute a check.
+    for idx, inv in enumerate(invoices):
         file = inv.get("file")
         for i, line in enumerate(inv.get("lines", [])):
             out.append({
-                "id": f"line-arithmetic:{file}:{i}",
+                "id": f"line-arithmetic:{idx}:{i}",
                 "kind": "line-arithmetic",
-                "scope": {"invoice": file, "line": i},
+                "scope": {"invoiceIndex": idx, "invoice": file, "line": i},
                 "statement": "an arithmetic-mismatch flag exists for this line "
                              "iff line_total != round(qty * unit_price, 2)",
             })
             bound = _applied_floor_max(line)
             if bound is not None:
                 out.append({
-                    "id": f"floor-max-unit-price:{file}:{i}",
+                    "id": f"floor-max-unit-price:{idx}:{i}",
                     "kind": "floor-max-unit-price",
-                    "scope": {"invoice": file, "line": i},
+                    "scope": {"invoiceIndex": idx, "invoice": file, "line": i},
                     "bound": bound[0],
                     "source": bound[1],
                     "statement": "unit_price exceeds the taught max iff a "
                                  "floor-veto is recorded for this line",
                 })
         out.append({
-            "id": f"invoice-reconcile:{file}",
+            "id": f"invoice-reconcile:{idx}",
             "kind": "invoice-reconcile",
-            "scope": {"invoice": file},
+            "scope": {"invoiceIndex": idx, "invoice": file},
             "statement": "statedTotalReconciles == (stated_total present and "
                          "round(sum(line_total), 2) within a cent of it)",
         })
@@ -106,41 +110,16 @@ def check_invariants(receipt: dict) -> list[str]:
     if requires and not invoices:
         return ["invariant-missing:invoices-stripped"]
 
-    # Group invoices by file. Only scalar file keys — an unhashable `file` (fuzz /
-    # schema mismatch) must not raise on dict-build or on the `in` tests below.
-    # Duplicate filenames are NEVER legitimate (each scan is a distinct file) and
-    # would let a `dict` silently keep only the last, masking a tampered earlier
-    # invoice — so collisions are recorded and fail closed, not last-wins.
-    by_file: dict = {}
-    dup_files: set = set()
-    for inv in invoices:
-        if not isinstance(inv, dict) or not _scalar(inv.get("file")):
-            continue
-        f = inv.get("file")
-        if f in by_file:
-            dup_files.add(f)
-        by_file[f] = inv
-    for f in sorted(dup_files, key=lambda x: (x is None, str(x))):
-        problems.append(f"invariant-unresolvable:duplicate-invoice-file:{f}")
-
     # Anti-strip: every invoice must be covered by a reconcile invariant and every
     # line by an arithmetic one. A removed declaration is a stripped invariant.
     if requires:
-        _check_coverage(declared, invoices, problems, dup_files)
+        _check_coverage(declared, invoices, problems)
 
     for decl in declared:
         if not isinstance(decl, dict):
             problems.append("invariant-unresolvable:malformed-declaration")
             continue
-        scope = decl.get("scope")
-        if not isinstance(scope, dict) or not _scalar(scope.get("invoice")):
-            problems.append(f"invariant-unresolvable:{decl.get('id')}")
-            continue
-        # A duplicated filename cannot resolve to ONE invoice — don't guess.
-        if scope.get("invoice") in dup_files:
-            problems.append(f"invariant-unresolvable:{decl.get('id')}")
-            continue
-        inv = by_file.get(scope.get("invoice"))
+        inv = _resolve_invoice(decl, invoices)
         if inv is None:
             problems.append(f"invariant-unresolvable:{decl.get('id')}")
             continue
@@ -172,12 +151,24 @@ def _claims_content(receipt: dict) -> bool:
     return False
 
 
-def _check_coverage(declared: list, invoices: list, problems: list,
-                    dup_files: set) -> None:
+def _resolve_invoice(decl: dict, invoices: list):
+    """Resolve a declaration to its invoice by POSITIONAL index — the invoice's
+    stable identity. A missing/out-of-range/bool index resolves to None (the
+    caller names it unresolvable), so nothing is ever guessed by filename."""
+    scope = decl.get("scope")
+    if not isinstance(scope, dict):
+        return None
+    idx = scope.get("invoiceIndex")
+    if not isinstance(idx, int) or isinstance(idx, bool) or not (0 <= idx < len(invoices)):
+        return None
+    inv = invoices[idx]
+    return inv if isinstance(inv, dict) else None
+
+
+def _check_coverage(declared: list, invoices: list, problems: list) -> None:
     """Every invoice needs a reconcile invariant; every line an arithmetic one;
     every line under a taught max a floor invariant. A missing one means the
-    block was stripped after audit — fail closed, named per surface. Duplicate-
-    filename invoices are already named unresolvable by the caller — skip them."""
+    block was stripped after audit — fail closed, named per surface (by index)."""
     reconcile = set()
     arithmetic = set()
     floor_max = set()
@@ -185,37 +176,30 @@ def _check_coverage(declared: list, invoices: list, problems: list,
         if not isinstance(d, dict):
             continue
         scope = d.get("scope") if isinstance(d.get("scope"), dict) else {}
-        inv_key = scope.get("invoice")
+        idx = scope.get("invoiceIndex")
         line_key = scope.get("line")
-        if not _scalar(inv_key) or not _scalar(line_key):
-            continue  # unhashable/hostile scope — the per-decl loop names it
+        if not isinstance(idx, int) or isinstance(idx, bool):
+            continue  # hostile/absent index — the per-decl loop names it
         kind = d.get("kind")
         if kind == "invoice-reconcile":
-            reconcile.add(inv_key)
+            reconcile.add(idx)
         elif kind == "line-arithmetic":
-            arithmetic.add((inv_key, line_key))
+            arithmetic.add((idx, line_key))
         elif kind == "floor-max-unit-price":
-            floor_max.add((inv_key, line_key))
-    for inv in invoices:
+            floor_max.add((idx, line_key))
+    for idx, inv in enumerate(invoices):
         if not isinstance(inv, dict):
             continue
-        file = inv.get("file")
-        if not _scalar(file):
-            # Unhashable/hostile file key — cannot key it into coverage sets.
-            problems.append("invariant-unresolvable:malformed-invoice-file")
-            continue
-        if file in dup_files:
-            continue  # already named unresolvable by the caller
-        if file not in reconcile:
-            problems.append(f"invariant-missing:invoice-reconcile:{file}")
+        if idx not in reconcile:
+            problems.append(f"invariant-missing:invoice-reconcile:{idx}")
         lines = inv.get("lines")
         for i, line in enumerate(lines if isinstance(lines, list) else []):
-            if (file, i) not in arithmetic:
-                problems.append(f"invariant-missing:line-arithmetic:{file}:{i}")
+            if (idx, i) not in arithmetic:
+                problems.append(f"invariant-missing:line-arithmetic:{idx}:{i}")
             # A line the floor covers with a max MUST carry its floor invariant —
             # else a stripped floor declaration would bypass verification.
-            if _applied_floor_max(line) is not None and (file, i) not in floor_max:
-                problems.append(f"invariant-missing:floor-max-unit-price:{file}:{i}")
+            if _applied_floor_max(line) is not None and (idx, i) not in floor_max:
+                problems.append(f"invariant-missing:floor-max-unit-price:{idx}:{i}")
 
 
 def _check_line_arithmetic(decl: dict, inv: dict, problems: list) -> None:
@@ -317,12 +301,6 @@ def _line_at(inv: dict, decl: dict):
         return None
     line = lines[idx]
     return line if isinstance(line, dict) else None
-
-
-def _scalar(x) -> bool:
-    """A hashable, set-safe scope value (filename/index/None) — never a bool,
-    dict, or list. Guards the coverage sets against hostile unhashable scopes."""
-    return isinstance(x, (str, int, type(None))) and not isinstance(x, bool)
 
 
 def _has_flag(inv: dict, kind: str, line_idx: int, relation_type: str | None = None) -> bool:
