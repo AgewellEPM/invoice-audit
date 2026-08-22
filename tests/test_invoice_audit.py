@@ -1813,6 +1813,36 @@ def test_stripped_invoices_with_empty_expected_and_totals_fails_closed():
     assert "invariant-missing:invoices-stripped" in check_invariants(forged)
 
 
+def test_floor_bound_pin_is_exact_catches_subcent_cap_tamper():
+    # HIGH (Codex r-gate 12): the floor bound<->cap cross-check is EXACT. A sub-cent
+    # single-field cap tamper (appliedMaxUnitPrice 12.00 -> 12.004) must be caught.
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        scans = Path(d) / "scans"
+        shutil.copytree(DEMO / "scans", scans)
+        floor = Path(d) / "floor.json"
+        floor.write_text(json.dumps({
+            "schema": "invoice-audit.floor.v1",
+            "rules": [{"subject": "*", "relation_type": "max_unit_price",
+                       "object": "1000000.00", "source": "test", "evidence": "x"}]}))
+        r = audit_folder(scans, DEMO / "pricebook.csv", floor_path=floor)
+        # Find any line carrying a floor invariant, tamper its cap sub-cent.
+        target = None
+        for e in r["expected"]:
+            if e["kind"] == "floor-max-unit-price":
+                target = (e["scope"]["invoiceIndex"], e["scope"]["line"])
+                break
+        assert target, "expected a floor invariant in the receipt"
+        inv_i, ln = target
+        def bump(body):
+            amp = body["invoices"][inv_i]["lines"][ln]["floor"]["appliedMaxUnitPrice"]
+            amp["object"] = float(amp["object"]) + 0.004
+        forged = _resign(r, bump)
+        probs = verify_receipt(forged, rehash_inputs=False)
+        assert "receipt-signature-invalid" not in probs
+        assert f"invariant-violated:floor-max-unit-price:{inv_i}:{ln}" in probs
+
+
 def test_floor_forged_high_bound_does_not_beat_line_cap():
     # HIGH (Codex r-gate 3): a forged high `bound` in the signed declaration must
     # not be trusted over the line's own recorded cap. Cross-check catches it.

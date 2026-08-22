@@ -273,7 +273,7 @@ def _check_floor_max(decl: dict, inv: dict, problems: list) -> None:
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
     try:
-        if abs(_f(decl_bound) - cap) > CENT:
+        if _f(decl_bound) != cap:   # exact: declared bound is a copy of the cap
             problems.append(f"invariant-violated:{decl.get('id')}")
             return
         exceeds = _f(line["unit_price"]) > cap   # strict, matches floor._violation
