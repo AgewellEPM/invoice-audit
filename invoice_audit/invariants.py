@@ -226,9 +226,15 @@ def _check_floor_max(decl: dict, inv: dict, problems: list) -> None:
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
     cap = applied[0]
+    # A legit floor declaration ALWAYS carries `bound` (build_invariants emits it).
+    # Absent bound == tampered: fail closed, never silently skip the cross-check
+    # (that skip was a bypass — a forged high appliedMaxUnitPrice with no bound).
+    decl_bound = decl.get("bound")
+    if decl_bound is None:
+        problems.append(f"invariant-unresolvable:{decl.get('id')}")
+        return
     try:
-        decl_bound = decl.get("bound")
-        if decl_bound is not None and abs(_f(decl_bound) - cap) > CENT:
+        if abs(_f(decl_bound) - cap) > CENT:
             problems.append(f"invariant-violated:{decl.get('id')}")
             return
         exceeds = _f(line["unit_price"]) > cap   # strict, matches floor._violation

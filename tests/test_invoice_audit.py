@@ -1827,6 +1827,21 @@ def test_floor_forged_high_bound_does_not_beat_line_cap():
     assert "invariant-violated:floor-max-unit-price:a.png:0" in check_invariants(r)
 
 
+def test_floor_absent_bound_fails_closed_not_skipped():
+    # HIGH (Codex r-gate 4): a floor declaration with NO `bound` (but an inflated
+    # line appliedMaxUnitPrice) must not silently skip the cross-check. Legit
+    # declarations always carry bound, so absent bound is tampered -> fail closed.
+    over = {"qty": 1, "unit_price": 100.0, "line_total": 100.0,
+            "floor": {"appliedMaxUnitPrice": {"object": 999.0, "source": "ops"}}}
+    r = {"schema": "perslis.invoice-audit-receipt.v2",
+         "invoices": [{"file": "a.png", "lines": [over],
+                       "statedTotalReconciles": False, "flags": []}],
+         "expected": [{"id": "floor-max-unit-price:a.png:0",
+                       "kind": "floor-max-unit-price",
+                       "scope": {"invoice": "a.png", "line": 0}}]}  # no bound
+    assert "invariant-unresolvable:floor-max-unit-price:a.png:0" in check_invariants(r)
+
+
 def test_unknown_invariants_version_fails_closed():
     # MEDIUM (Codex r-gate 3): a current-schema content receipt declaring an
     # invariants version we don't know how to check must fail closed.
