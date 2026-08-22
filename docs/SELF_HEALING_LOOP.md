@@ -143,8 +143,11 @@ are already real and tested. We extend this node; we do not invent a new one.
 
 ## Build order (do not skip, do not rush)
 
-1. **Symbolic layer emits an `expected` invariant block** into the receipt;
-   `verify` graduates from "hashes match" to "invariants hold." (Schema bump.)
+1. ✅ **DONE** — **Symbolic layer emits an `expected` invariant block** into the
+   receipt (`invariants.py`, schema v3); `verify` re-proves it and graduates from
+   "hashes match" to "invariants hold." A re-signed tamper is caught by the
+   invariant even though the forged signature is valid. Three kinds pinned:
+   line-arithmetic, invoice-reconcile, floor-max-unit-price.
 2. **Observer** reads ACTUAL state and reports EXPECTED≠ACTUAL as named
    contradictions (reuse the reason-code discipline).
 3. **Dependency graph** (TMS): edges between beliefs; a changed node marks only

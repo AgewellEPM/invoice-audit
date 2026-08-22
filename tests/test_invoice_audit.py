@@ -51,6 +51,8 @@ from invoice_audit.pricebook import PriceBook  # noqa: E402
 from invoice_audit.primitives import (  # noqa: E402
     Permission, REGISTRY, VerificationResult,
     primitives as list_primitives, verify as verify_primitive)
+from invoice_audit.invariants import (  # noqa: E402
+    build_invariants, check_invariants, INVARIANTS_VERSION)
 from contextlib import contextmanager  # noqa: E402
 
 
@@ -1499,6 +1501,127 @@ def test_provenance_dup_basename_absent_does_not_hide_hashed_sibling():
         assert str(absent) not in res.provenance["reHashed"]["scans"]
         assert any("scan-absent:invoice.png" == p for p in res.problems)
         assert res.problems == verify_receipt(r, rehash_inputs=True)
+
+
+# ---------------------------------------------------------------------------
+# EXPECTED invariants — the self-healing keystone. `verify` re-proves the audit's
+# own verdicts from the receipt's numbers, so a re-signed tamper is caught even
+# though the forged signature is valid. Multi-site: one pin PER invariant kind.
+# ---------------------------------------------------------------------------
+
+def _resign(receipt, mutate):
+    """Return a freshly-signed receipt after applying `mutate(body)` — simulates
+    an attacker who edits the body and forges a NEW valid signature."""
+    body = {k: v for k, v in receipt.items() if k not in ("signature", "publicKey")}
+    mutate(body)
+    return sign_receipt(body)
+
+
+def _demo_receipt():
+    _ensure_fixtures()
+    with tempfile.TemporaryDirectory() as d:
+        scans = Path(d) / "scans"
+        shutil.copytree(DEMO / "scans", scans)
+        return audit_folder(scans, DEMO / "pricebook.csv",
+                            floor_path=DEMO / "floor-rules.json")
+
+
+def test_audit_emits_expected_invariants_and_they_all_hold():
+    r = _demo_receipt()
+    assert r["schema"] == "perslis.invoice-audit-receipt.v3"
+    assert r["expectedVersion"] == INVARIANTS_VERSION
+    kinds = {e["kind"] for e in r["expected"]}
+    assert kinds == {"line-arithmetic", "invoice-reconcile", "floor-max-unit-price"}
+    # A freshly-audited receipt's own invariants must all hold (self-consistent).
+    assert check_invariants(r) == []
+    assert verify_receipt(r, rehash_inputs=False) == []
+
+
+def test_invariant_line_arithmetic_catches_resigned_tamper():
+    r = _demo_receipt()
+    def bump(body):
+        body["invoices"][0]["lines"][0]["line_total"] = round(
+            body["invoices"][0]["lines"][0]["line_total"] + 500.0, 2)
+    forged = _resign(r, bump)
+    probs = verify_receipt(forged, rehash_inputs=False)
+    assert "receipt-signature-invalid" not in probs      # forged sig is VALID
+    assert any(p.startswith("invariant-violated:line-arithmetic:") for p in probs)
+
+
+def test_invariant_invoice_reconcile_catches_resigned_tamper():
+    r = _demo_receipt()
+    target = r["invoices"][0]["file"]
+    def flip(body):
+        for inv in body["invoices"]:
+            if inv["file"] == target:
+                inv["statedTotalReconciles"] = not inv["statedTotalReconciles"]
+    forged = _resign(r, flip)
+    probs = verify_receipt(forged, rehash_inputs=False)
+    assert "receipt-signature-invalid" not in probs
+    assert f"invariant-violated:invoice-reconcile:{target}" in probs
+
+
+def test_invariant_floor_max_catches_suppressed_veto():
+    # The floor invariant pins: unit_price exceeds the taught max IFF a floor-veto
+    # is recorded. Suppress the veto flag (keep the over-max price) -> violation.
+    r = _demo_receipt()
+    decl = next(e for e in r["expected"] if e["kind"] == "floor-max-unit-price")
+    vetoed_file = decl["scope"]["invoice"]
+    def suppress(body):
+        for inv in body["invoices"]:
+            if inv["file"] == vetoed_file:
+                inv["flags"] = [f for f in inv["flags"] if f.get("kind") != "floor-veto"]
+    forged = _resign(r, suppress)
+    probs = verify_receipt(forged, rehash_inputs=False)
+    assert "receipt-signature-invalid" not in probs
+    assert f"invariant-violated:{decl['id']}" in probs
+
+
+def test_invariant_unresolvable_when_declaration_references_missing_invoice():
+    # A declaration pointing at an invoice the body no longer contains must fail
+    # closed (never silently pass, never crash).
+    r = sign_receipt({
+        "schema": SCHEMA, "scans": [], "pricebook": {},
+        "invoices": [],
+        "expected": [{"id": "line-arithmetic:ghost.png:0", "kind": "line-arithmetic",
+                      "scope": {"invoice": "ghost.png", "line": 0},
+                      "statement": "..."}],
+        "expectedVersion": INVARIANTS_VERSION,
+    })
+    probs = verify_receipt(r, rehash_inputs=False)
+    assert "invariant-unresolvable:line-arithmetic:ghost.png:0" in probs
+
+
+def test_check_invariants_never_raises_on_hostile_expected():
+    # Malformed declarations / non-dict receipt fail closed, never traceback.
+    assert check_invariants("not-a-dict") == ["invariant-unresolvable:receipt-not-a-dict"]
+    r = {"expected": ["not-a-dict", {"kind": "unknown-kind", "scope": {}, "id": "x"}],
+         "invoices": []}
+    probs = check_invariants(r)
+    assert "invariant-unresolvable:malformed-declaration" in probs
+    # unknown kind with an unresolvable invoice ref -> unresolvable, no crash.
+    assert any(p.startswith("invariant-unresolvable") for p in probs)
+
+
+def test_no_expected_block_is_a_clean_pass_backward_compat():
+    # An older signed receipt without an `expected` block still verifies — the
+    # invariant layer is additive, never a new way to fail a valid old receipt.
+    r = sign_receipt({"schema": SCHEMA, "scans": [], "pricebook": {}})
+    assert check_invariants(r) == []
+    assert verify_receipt(r, rehash_inputs=False) == []
+
+
+def test_verify_primitive_provenance_reports_invariants_proven():
+    r = _demo_receipt()
+    res = verify_primitive(r, rehash_inputs=False)
+    n = len(r["expected"])
+    assert res.provenance["invariants"]["declared"] == n
+    assert res.provenance["invariants"]["proven"] == n       # signed -> all proven
+    assert res.provenance["invariants"]["version"] == INVARIANTS_VERSION
+    # Unsigned short-circuits before invariants -> proven honestly 0.
+    unsigned = {k: v for k, v in r.items() if k not in ("signature", "publicKey")}
+    pv = verify_primitive(unsigned, rehash_inputs=False).provenance["invariants"]
+    assert pv["declared"] == n and pv["proven"] == 0
 
 
 if __name__ == "__main__":

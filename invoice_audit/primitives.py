@@ -118,12 +118,22 @@ def _verify(receipt: dict, *, rehash_inputs: bool = True) -> VerificationResult:
     by_kind: dict[str, list] = {}
     for kind, path in hashed:
         by_kind.setdefault(kind, []).append(path)
+    # Invariants are re-proven by the core only once the receipt is signed (an
+    # unsigned receipt short-circuits before them), so `proven` is honest: it is
+    # 0 for an unsigned body, and the full declared count once a signature exists.
+    declared = _safe_get(receipt, "expected")
+    n_declared = len(declared) if isinstance(declared, list) else 0
     provenance = {
         "schema": _safe_get(receipt, "schema"),
         "receiptGeneratedAt": _safe_get(receipt, "generatedAt"),
         "signatureChecked": signature_checked,
         "rehashedInputs": bool(rehash_inputs),
         "reHashed": {},
+        "invariants": {
+            "version": _safe_get(receipt, "expectedVersion"),
+            "declared": n_declared,
+            "proven": n_declared if signature_checked else 0,
+        },
     }
     if rehash_inputs:
         provenance["reHashed"] = {

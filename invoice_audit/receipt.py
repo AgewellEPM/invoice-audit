@@ -1,11 +1,12 @@
 """Signed audit receipt — proof is the product.
 
-Every audit emits `perslis.invoice-audit-receipt.v2`: the exact input scan
-hashes, the pricebook hash, the taught-rules hash, every line verdict, and an
-Ed25519 signature over the canonical JSON. `verify` re-checks the signature and
-(when the files are present) re-hashes the inputs — a receipt is re-runnable
-evidence, not a claim. Keys live at ~/.invoice-audit/ (0600), generated on
-first use.
+Every audit emits `perslis.invoice-audit-receipt.v3`: the exact input scan
+hashes, the pricebook hash, the taught-rules hash, every line verdict, an
+`expected` set of invariants, and an Ed25519 signature over the canonical JSON.
+`verify` re-checks the signature, (when the files are present) re-hashes the
+inputs, AND re-proves the invariants from the receipt's own numbers — a receipt
+is re-runnable, self-proving evidence, not a claim. Keys live at
+~/.invoice-audit/ (0600), generated on first use.
 
 Signing backend: prefer `cryptography` (OpenSSL, fast). Where its wheel is
 unavailable — an offline Windows/ARM64 guest — fall back to a vendored pure
@@ -18,6 +19,7 @@ import json
 import os
 from pathlib import Path
 
+from .invariants import check_invariants
 from .ocr import AuditError, sha256_file
 
 try:
@@ -30,7 +32,7 @@ except ImportError:  # no native wheel (e.g. Windows/ARM64 offline) — pure fal
     from . import _ed25519_pure as _ed
     HAVE_CRYPTOGRAPHY = False
 
-SCHEMA = "perslis.invoice-audit-receipt.v2"
+SCHEMA = "perslis.invoice-audit-receipt.v3"
 KEY_DIR = Path.home() / ".invoice-audit"
 
 
@@ -147,4 +149,9 @@ def verify_receipt(receipt: dict, rehash_inputs: bool = True, *,
             _recheck_file(receipt["marketBenchmarks"], "market-benchmarks", problems, _hashed)
         if receipt.get("floorRules"):
             _recheck_file(receipt["floorRules"], "floor-rules", problems, _hashed)
+    # Invariants hold, not just hashes match: re-prove the audit's own arithmetic
+    # and policy verdicts from the receipt's recorded numbers. Independent of disk
+    # (it reads the signed body), so it runs even with rehash off — a re-signed
+    # tampered body passes the signature yet fails here.
+    problems.extend(check_invariants(receipt))
     return problems

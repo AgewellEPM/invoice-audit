@@ -16,6 +16,7 @@ from .data_quality import (
     data_quality_report, normalize_invoice_date, sort_invoices_chronologically)
 from .grounding import ground_line, stated_total_reconciles
 from .ingest import collect_scan_inputs
+from .invariants import build_invariants, INVARIANTS_VERSION
 from .layout import parse_invoice
 from .llm_extract import review_if_configured
 from .ocr import AuditError, backend_label, ocr_image, sha256_file
@@ -178,6 +179,12 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
         "toleranceRatio": tolerance,
         "invoices": invoices,
         "reviewQueue": review_queue,
+        # EXPECTED: the invariants verify re-proves from the receipt's own
+        # numbers (docs/SELF_HEALING_LOOP.md). Signed into the body, so tampering
+        # the declarations breaks the signature; tampering a line breaks the
+        # invariant. Emitted from what the deterministic gates already computed.
+        "expected": build_invariants(invoices),
+        "expectedVersion": INVARIANTS_VERSION,
         "totals": {
             "invoices": len(invoices),
             "linesChecked": sum(len(i["lines"]) for i in invoices),
