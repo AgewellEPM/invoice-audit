@@ -1852,6 +1852,16 @@ def test_unknown_invariants_version_fails_closed():
     assert any(p.startswith("invariant-unresolvable:expected-version") for p in probs)
 
 
+def test_unhashable_invoice_file_key_fails_closed_not_crash():
+    # MEDIUM (Codex r-gate 5): an unhashable invoice `file` must not crash the
+    # by_file build or the coverage `in` tests — fail closed to a named reason.
+    r = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+         "invoices": [{"file": {"unhashable": "dict"}, "lines": []}],
+         "expected": []}
+    probs = check_invariants(r)                          # must not raise
+    assert "invariant-unresolvable:malformed-invoice-file" in probs
+
+
 def test_unhashable_scope_value_fails_closed_not_crash():
     # MEDIUM (Codex r-gate 3): a hostile unhashable scope value must not crash the
     # coverage set-build; it fails closed via the per-declaration loop.

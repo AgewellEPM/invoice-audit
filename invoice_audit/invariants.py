@@ -106,7 +106,11 @@ def check_invariants(receipt: dict) -> list[str]:
     if requires and not invoices:
         return ["invariant-missing:invoices-stripped"]
 
-    by_file = {inv.get("file"): inv for inv in invoices if isinstance(inv, dict)}
+    # Only scalar file keys — an unhashable `file` (fuzz / schema mismatch) must
+    # not raise on dict-build or on the `in` set tests below. Non-scalar-file
+    # invoices are named unresolvable in _check_coverage, never silently dropped.
+    by_file = {inv.get("file"): inv for inv in invoices
+               if isinstance(inv, dict) and _scalar(inv.get("file"))}
 
     # Anti-strip: every invoice must be covered by a reconcile invariant and every
     # line by an arithmetic one. A removed declaration is a stripped invariant.
@@ -179,6 +183,10 @@ def _check_coverage(declared: list, invoices: list, problems: list) -> None:
         if not isinstance(inv, dict):
             continue
         file = inv.get("file")
+        if not _scalar(file):
+            # Unhashable/hostile file key — cannot key it into coverage sets.
+            problems.append("invariant-unresolvable:malformed-invoice-file")
+            continue
         if file not in reconcile:
             problems.append(f"invariant-missing:invoice-reconcile:{file}")
         lines = inv.get("lines")
