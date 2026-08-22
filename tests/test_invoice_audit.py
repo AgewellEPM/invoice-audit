@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import base64
+import hashlib
 import os
 import shutil
 import subprocess
@@ -1423,6 +1424,81 @@ def test_verify_result_authoritative_part_stable_across_runs():
     del a["timestamp"]
     del b["timestamp"]
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Provenance honesty — reHashed must reflect ONLY files whose bytes were read.
+# Codex r-gate 2026-08-21 found three ways it could over-claim. One pin per hole.
+# ---------------------------------------------------------------------------
+
+def test_provenance_unsigned_never_claims_rehash():
+    # HOLE 1: an unsigned receipt short-circuits before ANY hashing. Provenance
+    # must not claim a re-hash the core never performed — even with a real,
+    # present file on disk and rehash ON.
+    with tempfile.TemporaryDirectory() as d:
+        scan = Path(d) / "real.png"
+        scan.write_bytes(b"pixels")
+        digest = hashlib.sha256(scan.read_bytes()).hexdigest()
+        unsigned = {  # deliberately no signature/publicKey
+            "schema": SCHEMA,
+            "scans": [{"path": str(scan), "sha256": digest, "file": "real.png"}],
+            "pricebook": {},
+        }
+        res = verify_primitive(unsigned, rehash_inputs=True)
+        assert "receipt-unsigned" in res.problems
+        assert res.provenance["signatureChecked"] is False
+        assert res.provenance["reHashed"]["scans"] == []   # nothing was hashed
+        assert res.problems == verify_receipt(unsigned, rehash_inputs=True)
+
+
+def test_provenance_source_without_sha_not_claimed():
+    # HOLE 2: a scan with source_path but NO source_sha256 is not re-hashed by
+    # the core (it needs both). Provenance must not list the source as hashed.
+    with tempfile.TemporaryDirectory() as d:
+        scan = Path(d) / "scan.png"
+        src = Path(d) / "orig.pdf"
+        scan.write_bytes(b"img")
+        src.write_bytes(b"pdf-bytes")
+        r = sign_receipt({
+            "schema": SCHEMA,
+            "scans": [{
+                "path": str(scan),
+                "sha256": hashlib.sha256(scan.read_bytes()).hexdigest(),
+                "file": "scan.png",
+                "source_path": str(src),      # present on disk...
+                # ...but NO source_sha256 → the core never hashes it.
+            }],
+            "pricebook": {},
+        })
+        res = verify_primitive(r, rehash_inputs=True)
+        assert res.provenance["reHashed"]["scans"] == [str(scan)]  # scan WAS hashed
+        assert res.provenance["reHashed"]["sources"] == []          # source was NOT
+        assert res.problems == verify_receipt(r, rehash_inputs=True)
+
+
+def test_provenance_dup_basename_absent_does_not_hide_hashed_sibling():
+    # HOLE 3: two scans sharing a basename in different dirs, one absent, one
+    # present. Basename-keyed reason matching used to drop the present (hashed)
+    # file from provenance. Now reHashed is recorded by actual full path.
+    with tempfile.TemporaryDirectory() as d:
+        present = Path(d) / "a" / "invoice.png"
+        absent = Path(d) / "b" / "invoice.png"     # same basename, never created
+        present.parent.mkdir(parents=True)
+        present.write_bytes(b"real")
+        r = sign_receipt({
+            "schema": SCHEMA,
+            "scans": [
+                {"path": str(present), "sha256": hashlib.sha256(b"real").hexdigest(),
+                 "file": "invoice.png"},
+                {"path": str(absent), "sha256": "deadbeef", "file": "invoice.png"},
+            ],
+            "pricebook": {},
+        })
+        res = verify_primitive(r, rehash_inputs=True)
+        assert str(present) in res.provenance["reHashed"]["scans"]   # not hidden
+        assert str(absent) not in res.provenance["reHashed"]["scans"]
+        assert any("scan-absent:invoice.png" == p for p in res.problems)
+        assert res.problems == verify_receipt(r, rehash_inputs=True)
 
 
 if __name__ == "__main__":

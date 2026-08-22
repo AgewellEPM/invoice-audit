@@ -85,10 +85,15 @@ def sign_receipt(body: dict) -> dict:
     return {**body, "publicKey": pub.hex(), "signature": signature.hex()}
 
 
-def _recheck_file(obj, kind: str, problems: list) -> None:
+def _recheck_file(obj, kind: str, problems: list, hashed: list | None = None) -> None:
     """Re-hash one referenced input, fail-closed with a NAMED reason. Tolerates a
     malformed (path-less / non-dict) entry — a verification must never crash into
-    an unnamed traceback on a signed-but-malformed body; it emits a reason code."""
+    an unnamed traceback on a signed-but-malformed body; it emits a reason code.
+
+    When `hashed` is provided, the path is appended as `(kind, path)` at the exact
+    moment its bytes are read — the ONLY honest source of "what was re-hashed."
+    A tampered file is still recorded (it WAS hashed; it just didn't match); an
+    absent or malformed one never is (its bytes were never read)."""
     path = obj.get("path") if isinstance(obj, dict) else None
     if not path:
         problems.append(f"{kind}-malformed-no-path")
@@ -96,38 +101,50 @@ def _recheck_file(obj, kind: str, problems: list) -> None:
     p = Path(path)
     if not p.exists():
         problems.append(f"{kind}-absent:{p.name}")
-    elif sha256_file(p) != (obj.get("sha256") if isinstance(obj, dict) else None):
+        return
+    if hashed is not None:
+        hashed.append((kind, path))
+    if sha256_file(p) != (obj.get("sha256") if isinstance(obj, dict) else None):
         problems.append(f"{kind}-hash-changed:{p.name}")
 
 
-def verify_receipt(receipt: dict, rehash_inputs: bool = True) -> list[str]:
-    """Return list of named problems; empty list == verified."""
+def verify_receipt(receipt: dict, rehash_inputs: bool = True,
+                   _hashed: list | None = None) -> list[str]:
+    """Return list of named problems; empty list == verified.
+
+    `_hashed` is an optional out-parameter: when a list is passed, it is filled
+    with `(kind, path)` for every file whose bytes were ACTUALLY re-hashed —
+    the single source of truth for provenance (see primitives._verify). It never
+    changes the returned verdict; callers that only want the verdict ignore it."""
     problems: list[str] = []
     sig = receipt.get("signature")
     pub = receipt.get("publicKey")
     if not sig or not pub:
-        return ["receipt-unsigned"]
+        return ["receipt-unsigned"]        # early return: nothing was hashed
     body = {k: v for k, v in receipt.items() if k not in ("signature", "publicKey")}
     if not _verify_sig(bytes.fromhex(pub), _canonical(body), bytes.fromhex(sig)):
         problems.append("receipt-signature-invalid")
     if rehash_inputs:
         for scan in receipt.get("scans", []):
             scan = scan if isinstance(scan, dict) else {}
-            _recheck_file(scan, "scan", problems)
+            _recheck_file(scan, "scan", problems, _hashed)
             source_path = scan.get("source_path")
             source_sha256 = scan.get("source_sha256")
             if source_path and source_sha256:
                 sp = Path(source_path)
                 if not sp.exists():
                     problems.append(f"source-absent:{sp.name}")
-                elif sha256_file(sp) != source_sha256:
-                    problems.append(f"source-hash-changed:{sp.name}")
+                else:
+                    if _hashed is not None:
+                        _hashed.append(("source", source_path))
+                    if sha256_file(sp) != source_sha256:
+                        problems.append(f"source-hash-changed:{sp.name}")
         if receipt.get("pricebook"):
-            _recheck_file(receipt["pricebook"], "pricebook", problems)
+            _recheck_file(receipt["pricebook"], "pricebook", problems, _hashed)
         if receipt.get("marketPricebook"):
-            _recheck_file(receipt["marketPricebook"], "market-pricebook", problems)
+            _recheck_file(receipt["marketPricebook"], "market-pricebook", problems, _hashed)
         if receipt.get("marketBenchmarks"):
-            _recheck_file(receipt["marketBenchmarks"], "market-benchmarks", problems)
+            _recheck_file(receipt["marketBenchmarks"], "market-benchmarks", problems, _hashed)
         if receipt.get("floorRules"):
-            _recheck_file(receipt["floorRules"], "floor-rules", problems)
+            _recheck_file(receipt["floorRules"], "floor-rules", problems, _hashed)
     return problems

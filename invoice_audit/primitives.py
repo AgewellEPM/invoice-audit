@@ -14,7 +14,6 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass, asdict
 from enum import Enum
-from pathlib import Path
 from typing import Callable
 
 from .receipt import verify_receipt
@@ -86,35 +85,17 @@ def _safe_get(obj, key):
     return obj.get(key) if isinstance(obj, dict) else None
 
 
-def _entry_paths(entries, key):
-    """Pull `key` from each entry, tolerating any shape (dict / str) so the
-    provenance builder never raises on a malformed receipt."""
-    out = []
-    for e in entries if isinstance(entries, list) else []:
-        if isinstance(e, dict):
-            v = e.get(key)
-            if v:
-                out.append(v)
-        elif isinstance(e, str) and key == "path":
-            out.append(e)
-    return out
-
-
-def _was_hashed(path, kind: str, problems: list) -> bool:
-    """True iff the core genuinely re-hashed this file — present and well-formed,
-    i.e. no `{kind}-absent:<name>` and no `{kind}-malformed-no-path` was recorded.
-    Provenance is derived from what actually ran, never from mere intent."""
-    if not path or f"{kind}-malformed-no-path" in problems:
-        return False
-    return f"{kind}-absent:{Path(path).name}" not in problems
-
-
-def _hashed_one(path, kind, problems):
-    return path if _was_hashed(path, kind, problems) else None
-
-
-def _hashed_list(paths, kind, problems):
-    return [p for p in paths if _was_hashed(p, kind, problems)]
+# reHashed provenance categories, mapped from the core's internal `kind` codes.
+# `single=True` categories can only reference one file, so they surface as a
+# lone path (or None), not a list.
+_REHASH_KINDS = [
+    ("scans", "scan", False),
+    ("sources", "source", False),
+    ("pricebook", "pricebook", True),
+    ("marketPricebook", "market-pricebook", True),
+    ("marketBenchmarks", "market-benchmarks", True),
+    ("floorRules", "floor-rules", True),
+]
 
 
 def _verify(receipt: dict, *, rehash_inputs: bool = True) -> VerificationResult:
@@ -122,16 +103,21 @@ def _verify(receipt: dict, *, rehash_inputs: bool = True) -> VerificationResult:
     authoritative check, unchanged) into the standard result shape with
     provenance. It never raises where the core returns a verdict (a non-dict
     receipt fails closed identically to the core), and its provenance records
-    only what the core actually executed — never more."""
-    problems = verify_receipt(receipt, rehash_inputs=rehash_inputs)
-    # Provenance is DERIVED from what verify_receipt actually did (the `problems`
-    # tell us what was absent/malformed), not from the receipt's fields:
-    #  - signatureChecked is true only if a signature check ran — an unsigned
-    #    receipt short-circuits (`receipt-unsigned`) before any check.
-    #  - reHashed lists only files GENUINELY re-hashed (present + well-formed),
-    #    keyed by the same `path` the core hashes, and it includes the source
-    #    files the core re-checks. Rehash off → reHashed is empty (nothing ran).
+    ONLY files the core actually re-hashed — never more."""
+    # `hashed` is filled BY the core, at the exact point each file's bytes are
+    # read — so provenance can only ever report work that genuinely happened.
+    # Not re-derived from the receipt or from reason codes: an unsigned receipt
+    # short-circuits before any hashing and the list stays empty; an absent or
+    # sha-less input is never appended; a tampered-but-present file IS (it was
+    # hashed, it just didn't match). This is the single source of truth.
+    hashed: list = []
+    problems = verify_receipt(receipt, rehash_inputs=rehash_inputs, _hashed=hashed)
+    # signatureChecked is true only if a signature check ran — an unsigned
+    # receipt short-circuits (`receipt-unsigned`) before any check.
     signature_checked = "receipt-unsigned" not in problems
+    by_kind: dict[str, list] = {}
+    for kind, path in hashed:
+        by_kind.setdefault(kind, []).append(path)
     provenance = {
         "schema": _safe_get(receipt, "schema"),
         "receiptGeneratedAt": _safe_get(receipt, "generatedAt"),
@@ -140,14 +126,10 @@ def _verify(receipt: dict, *, rehash_inputs: bool = True) -> VerificationResult:
         "reHashed": {},
     }
     if rehash_inputs:
-        scans = receipt.get("scans", []) if isinstance(receipt, dict) else []
         provenance["reHashed"] = {
-            "scans": _hashed_list(_entry_paths(scans, "path"), "scan", problems),
-            "sources": _hashed_list(_entry_paths(scans, "source_path"), "source", problems),
-            "pricebook": _hashed_one(_safe_get(_safe_get(receipt, "pricebook"), "path"), "pricebook", problems),
-            "marketPricebook": _hashed_one(_safe_get(_safe_get(receipt, "marketPricebook"), "path"), "market-pricebook", problems),
-            "marketBenchmarks": _hashed_one(_safe_get(_safe_get(receipt, "marketBenchmarks"), "path"), "market-benchmarks", problems),
-            "floorRules": _hashed_one(_safe_get(_safe_get(receipt, "floorRules"), "path"), "floor-rules", problems),
+            key: ((by_kind.get(kind, [None])[0] if single
+                   else by_kind.get(kind, [])))
+            for key, kind, single in _REHASH_KINDS
         }
     return VerificationResult(
         ok=(len(problems) == 0),
