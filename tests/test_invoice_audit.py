@@ -1703,7 +1703,8 @@ def test_check_invariants_total_on_hostile_container_shapes():
          "expected": [
              {"id": "s", "kind": "line-arithmetic", "scope": "not-a-dict"},
              {"id": "line-arithmetic:0:0", "kind": "line-arithmetic",
-              "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0}},
+              "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0},
+              "operands": {"qty": 1, "unit_price": 5.0, "line_total": 5.0}},
          ]}
     probs = check_invariants(r)                                   # must not raise (flags not-a-list)
     assert "invariant-unresolvable:s" in probs                    # non-dict scope
@@ -1773,7 +1774,8 @@ def test_flag_bool_line_index_not_counted_as_line_zero():
                        "statedTotalReconciles": False,
                        "flags": [{"kind": "arithmetic-mismatch", "line": False}]}],
          "expected": [{"id": "line-arithmetic:0:0", "kind": "line-arithmetic",
-                       "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0}}]}
+                       "scope": {"invoiceIndex": 0, "invoice": "a.png", "line": 0},
+                       "operands": {"qty": 2.0, "unit_price": 3.0, "line_total": 5.0}}]}
     assert "invariant-violated:line-arithmetic:0:0" in check_invariants(r)
 
 
@@ -1891,6 +1893,39 @@ def test_unhashable_invoice_file_is_harmless_under_index_keying():
          "expected": []}
     probs = check_invariants(r)                          # must not raise
     assert "invariant-missing:invoice-reconcile:0" in probs
+
+
+def test_operand_pin_catches_tamper_on_already_flagged_line():
+    # HIGH (Codex r-gate 10): a re-signed tamper on an ALREADY-flagged line (whose
+    # boolean mismatch verdict does not move) must still be caught — the pinned
+    # operands cross-check the actual money values, not just the verdict.
+    inv = {"file": "a.png", "stated_total": None, "statedTotalReconciles": False,
+           "lines": [{"qty": 2.0, "unit_price": 10.0, "line_total": 25.0}],  # 20 != 25 -> flagged
+           "flags": [{"kind": "arithmetic-mismatch", "line": 0}]}
+    r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+                      "scans": [], "pricebook": {}, "invoices": [inv],
+                      "expected": build_invariants([inv])})
+    assert verify_receipt(r, rehash_inputs=False) == []
+    # Change the flagged line's total 25 -> 30 (still mismatched) and re-sign.
+    forged = _resign(r, lambda b: b["invoices"][0]["lines"][0].__setitem__("line_total", 30.0))
+    probs = verify_receipt(forged, rehash_inputs=False)
+    assert "receipt-signature-invalid" not in probs        # forged sig is valid
+    assert "invariant-violated:line-arithmetic:0:0" in probs
+
+
+def test_reconcile_pin_catches_tamper_on_nonreconciling_invoice():
+    # HIGH (Codex r-gate 10): same class for stated_total — a tamper on a
+    # non-reconciling invoice (boolean verdict stays False) is caught by the pin.
+    inv = {"file": "a.png", "stated_total": 999.0, "statedTotalReconciles": False,
+           "lines": [{"qty": 1.0, "unit_price": 10.0, "line_total": 10.0}], "flags": []}
+    r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+                      "scans": [], "pricebook": {}, "invoices": [inv],
+                      "expected": build_invariants([inv])})
+    assert verify_receipt(r, rehash_inputs=False) == []
+    forged = _resign(r, lambda b: b["invoices"][0].__setitem__("stated_total", 888.0))
+    probs = verify_receipt(forged, rehash_inputs=False)
+    assert "receipt-signature-invalid" not in probs
+    assert "invariant-violated:invoice-reconcile:0" in probs
 
 
 def test_overlarge_number_operand_fails_closed_not_crash():

@@ -54,8 +54,15 @@ def build_invariants(invoices: list[dict]) -> list[dict]:
                 "id": f"line-arithmetic:{idx}:{i}",
                 "kind": "line-arithmetic",
                 "scope": {"invoiceIndex": idx, "invoice": file, "line": i},
-                "statement": "an arithmetic-mismatch flag exists for this line "
-                             "iff line_total != round(qty * unit_price, 2)",
+                # The signed money operands, pinned. verify cross-checks them
+                # against the line so a single-field tamper is caught even on an
+                # already-flagged line (whose boolean verdict wouldn't move).
+                "operands": {"qty": line.get("qty"),
+                             "unit_price": line.get("unit_price"),
+                             "line_total": line.get("line_total")},
+                "statement": "line qty/unit/total match the pinned operands, and "
+                             "an arithmetic-mismatch flag exists iff "
+                             "line_total != round(qty * unit_price, 2)",
             })
             bound = _applied_floor_max(line)
             if bound is not None:
@@ -72,7 +79,9 @@ def build_invariants(invoices: list[dict]) -> list[dict]:
             "id": f"invoice-reconcile:{idx}",
             "kind": "invoice-reconcile",
             "scope": {"invoiceIndex": idx, "invoice": file},
-            "statement": "statedTotalReconciles == (stated_total present and "
+            "statedTotal": inv.get("stated_total"),   # pinned (may be null)
+            "statement": "stated_total matches the pinned value, and "
+                         "statedTotalReconciles == (stated_total present and "
                          "round(sum(line_total), 2) within a cent of it)",
         })
     return out
@@ -214,7 +223,18 @@ def _check_line_arithmetic(decl: dict, inv: dict, problems: list) -> None:
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
     idx = decl["scope"]["line"]
+    operands = decl.get("operands")
+    if not isinstance(operands, dict):
+        # Legit declarations always pin operands — absent means tampered.
+        problems.append(f"invariant-unresolvable:{decl.get('id')}")
+        return
     try:
+        # The pinned operands must match the line — catches a single-field tamper
+        # even on an already-flagged line (boolean verdict alone wouldn't move).
+        for key in ("qty", "unit_price", "line_total"):
+            if abs(_f(line[key]) - _f(operands[key])) > CENT:
+                problems.append(f"invariant-violated:{decl.get('id')}")
+                return
         computed_ok = abs(round(_f(line["qty"]) * _f(line["unit_price"]), 2)
                           - _f(line["line_total"])) <= CENT
     except (KeyError, TypeError, ValueError):
@@ -273,8 +293,21 @@ def _check_invoice_reconcile(decl: dict, inv: dict, problems: list) -> None:
         # rather than let bool(None)==False silently pass a false recomputation.
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
+    if "statedTotal" not in decl:
+        # Legit declarations pin stated_total (possibly null) — absent == tampered.
+        problems.append(f"invariant-unresolvable:{decl.get('id')}")
+        return
+    stated = inv.get("stated_total")
+    pinned = decl["statedTotal"]
     try:
-        stated = inv.get("stated_total")
+        # The pinned stated_total must match the line — catches a tamper on a
+        # non-reconciling invoice whose boolean verdict wouldn't otherwise move.
+        if (stated is None) != (pinned is None):
+            problems.append(f"invariant-violated:{decl.get('id')}")
+            return
+        if stated is not None and abs(_f(stated) - _f(pinned)) > CENT:
+            problems.append(f"invariant-violated:{decl.get('id')}")
+            return
         lines = inv.get("lines")
         lines = lines if isinstance(lines, list) else []
         if stated is None:
