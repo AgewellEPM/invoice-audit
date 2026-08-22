@@ -1621,7 +1621,7 @@ def test_contentless_current_receipt_needs_no_invariants():
 def test_stripped_expected_block_fails_closed_not_bypassed():
     # HIGH (Codex r-gate): a CURRENT-schema receipt WITH invoices but a stripped
     # `expected` block must fail closed — invariants are not attacker-optional.
-    with_content = {"schema": SCHEMA,
+    with_content = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
                     "invoices": [{"file": "a.png",
                                   "lines": [{"qty": 1, "unit_price": 5.0, "line_total": 5.0}],
                                   "statedTotalReconciles": False}]}
@@ -1726,7 +1726,7 @@ def test_stripped_floor_declaration_named_missing():
     # was removed must be named missing, not silently uncovered.
     line = {"qty": 1, "unit_price": 50.0, "line_total": 50.0,
             "floor": {"appliedMaxUnitPrice": {"object": 60.0, "source": "ops"}}}
-    r = {"schema": SCHEMA,
+    r = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
          "invoices": [{"file": "a.png", "lines": [line], "statedTotalReconciles": False}],
          "expected": [
              {"id": "line-arithmetic:a.png:0", "kind": "line-arithmetic",
@@ -1795,6 +1795,75 @@ def test_verify_primitive_provenance_reports_invariants_held():
         "line_total", round(b["invoices"][0]["lines"][0]["line_total"] + 9, 2)))
     fv = verify_primitive(forged, rehash_inputs=False).provenance["invariants"]
     assert fv["checked"] is True and fv["held"] is False
+
+
+def test_money_totals_alone_claim_content_and_demand_invariants():
+    # HIGH (Codex r-gate 3): a forgery keeping only a money total (not the count
+    # keys) while stripping invoices/expected must still be required to prove.
+    forged = {"schema": SCHEMA, "totals": {"potentialOverchargeUSD": 6000.0}}
+    assert "invariant-missing:expected-block-absent" in check_invariants(forged)
+
+
+def test_stripped_invoices_with_empty_expected_and_totals_fails_closed():
+    # HIGH (Codex r-gate 3): invoices stripped, expected emptied to [], but totals
+    # still claim content -> the invoices-stripped guard catches it.
+    forged = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+              "expected": [], "totals": {"linesChecked": 7}}
+    assert "invariant-missing:invoices-stripped" in check_invariants(forged)
+
+
+def test_floor_forged_high_bound_does_not_beat_line_cap():
+    # HIGH (Codex r-gate 3): a forged high `bound` in the signed declaration must
+    # not be trusted over the line's own recorded cap. Cross-check catches it.
+    over = {"qty": 1, "unit_price": 100.0, "line_total": 100.0,
+            "floor": {"appliedMaxUnitPrice": {"object": 60.0, "source": "ops"}}}
+    r = {"schema": "perslis.invoice-audit-receipt.v2",
+         "invoices": [{"file": "a.png", "lines": [over],
+                       "statedTotalReconciles": False, "flags": []}],
+         "expected": [{"id": "floor-max-unit-price:a.png:0",
+                       "kind": "floor-max-unit-price",
+                       "scope": {"invoice": "a.png", "line": 0},
+                       "bound": 999999.0}]}   # forged high cap
+    assert "invariant-violated:floor-max-unit-price:a.png:0" in check_invariants(r)
+
+
+def test_unknown_invariants_version_fails_closed():
+    # MEDIUM (Codex r-gate 3): a current-schema content receipt declaring an
+    # invariants version we don't know how to check must fail closed.
+    r = {"schema": SCHEMA, "expectedVersion": "invoice-audit.invariants.v999",
+         "invoices": [{"file": "a.png", "lines": [], "statedTotalReconciles": False}],
+         "expected": []}
+    probs = check_invariants(r)
+    assert any(p.startswith("invariant-unresolvable:expected-version") for p in probs)
+
+
+def test_unhashable_scope_value_fails_closed_not_crash():
+    # MEDIUM (Codex r-gate 3): a hostile unhashable scope value must not crash the
+    # coverage set-build; it fails closed via the per-declaration loop.
+    r = {"schema": "perslis.invoice-audit-receipt.v2",
+         "invoices": [{"file": "a.png", "lines": [], "statedTotalReconciles": False}],
+         "expected": [{"id": "x", "kind": "line-arithmetic",
+                       "scope": {"invoice": {"nested": "dict"}, "line": 0}}]}
+    probs = check_invariants(r)                          # must not raise
+    assert "invariant-unresolvable:x" in probs
+
+
+def test_floor_veto_detail_fallback_when_relation_type_absent():
+    # MEDIUM (Codex r-gate 3): a pre-fix floor-veto flag with no structured
+    # relation_type is matched via the detail string (backward-compat).
+    over = {"qty": 1, "unit_price": 100.0, "line_total": 100.0,
+            "floor": {"appliedMaxUnitPrice": {"object": 60.0, "source": "ops"}}}
+    r = {"schema": "perslis.invoice-audit-receipt.v2",
+         "invoices": [{"file": "a.png", "lines": [over],
+                       "statedTotalReconciles": False,
+                       "flags": [{"kind": "floor-veto", "line": 0,
+                                  "detail": "unit 100 exceeds taught max 60 "
+                                            "[max_unit_price src=ops]"}]}],
+         "expected": [{"id": "floor-max-unit-price:a.png:0",
+                       "kind": "floor-max-unit-price",
+                       "scope": {"invoice": "a.png", "line": 0}, "bound": 60.0}]}
+    # exceeds (100>60) True and the veto is matched via detail -> holds, no flag.
+    assert not any("floor-max" in p for p in check_invariants(r))
 
 
 if __name__ == "__main__":

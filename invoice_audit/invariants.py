@@ -97,6 +97,14 @@ def check_invariants(receipt: dict) -> list[str]:
         return ["invariant-missing:expected-block-absent"] if requires else []
     if not isinstance(declared, list):
         return ["invariant-unresolvable:expected-not-a-list"]
+    # Unknown ruleset -> we cannot honestly re-prove. A current-schema content
+    # receipt MUST declare the invariants version we know how to check.
+    if requires and receipt.get("expectedVersion") != INVARIANTS_VERSION:
+        return [f"invariant-unresolvable:expected-version:{receipt.get('expectedVersion')}"]
+    # Content is claimed but there are no invoices to cover it -> `invoices` was
+    # stripped while a content surface (totals) was kept. Fail closed.
+    if requires and not invoices:
+        return ["invariant-missing:invoices-stripped"]
 
     by_file = {inv.get("file"): inv for inv in invoices if isinstance(inv, dict)}
 
@@ -110,7 +118,7 @@ def check_invariants(receipt: dict) -> list[str]:
             problems.append("invariant-unresolvable:malformed-declaration")
             continue
         scope = decl.get("scope")
-        if not isinstance(scope, dict):
+        if not isinstance(scope, dict) or not _scalar(scope.get("invoice")):
             problems.append(f"invariant-unresolvable:{decl.get('id')}")
             continue
         inv = by_file.get(scope.get("invoice"))
@@ -131,14 +139,15 @@ def check_invariants(receipt: dict) -> list[str]:
 
 def _claims_content(receipt: dict) -> bool:
     """True iff the receipt asserts audited findings — via invoices, a review
-    queue, or non-zero totals. Used to demand invariants even if `invoices` was
-    stripped while a content-claiming surface (totals) was kept."""
+    queue, or ANY non-zero total (count OR money: linesChecked, flagged,
+    potentialOverchargeUSD, marketOverchargeUSD, policyOverageUSD, …). Any
+    positive number in `totals` counts, so no money/finding surface can be kept
+    while `invoices` is stripped to dodge the invariant requirement."""
     if receipt.get("invoices") or receipt.get("reviewQueue"):
         return True
     totals = receipt.get("totals")
     if isinstance(totals, dict):
-        for k in ("invoices", "linesChecked", "flagged"):
-            v = totals.get(k)
+        for v in totals.values():
             if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
                 return True
     return False
@@ -155,13 +164,17 @@ def _check_coverage(declared: list, invoices: list, problems: list) -> None:
         if not isinstance(d, dict):
             continue
         scope = d.get("scope") if isinstance(d.get("scope"), dict) else {}
+        inv_key = scope.get("invoice")
+        line_key = scope.get("line")
+        if not _scalar(inv_key) or not _scalar(line_key):
+            continue  # unhashable/hostile scope — the per-decl loop names it
         kind = d.get("kind")
         if kind == "invoice-reconcile":
-            reconcile.add(scope.get("invoice"))
+            reconcile.add(inv_key)
         elif kind == "line-arithmetic":
-            arithmetic.add((scope.get("invoice"), scope.get("line")))
+            arithmetic.add((inv_key, line_key))
         elif kind == "floor-max-unit-price":
-            floor_max.add((scope.get("invoice"), scope.get("line")))
+            floor_max.add((inv_key, line_key))
     for inv in invoices:
         if not isinstance(inv, dict):
             continue
@@ -202,11 +215,23 @@ def _check_floor_max(decl: dict, inv: dict, problems: list) -> None:
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
     idx = decl["scope"]["line"]
+    # The cap comes from the LINE's own recorded floor output (single source of
+    # truth), not the declaration's `bound` — a forged high bound in the signed
+    # declaration must not be trusted over what the floor recorded. The declared
+    # bound is then cross-checked to match; divergence is a tampered declaration.
+    # (Residual, documented: both are in the signed body — full re-derivation from
+    # the hashed floorRules file is the TMS step, build order #3.)
+    applied = _applied_floor_max(line)
+    if applied is None:
+        problems.append(f"invariant-unresolvable:{decl.get('id')}")
+        return
+    cap = applied[0]
     try:
-        # Strict `>`, matching the producer (floor._violation). No CENT band:
-        # the floor vetoes on unit_price > cap exactly, so we must too or a veto
-        # in the half-cent band would falsely (mis)match.
-        exceeds = _f(line["unit_price"]) > _f(decl["bound"])
+        decl_bound = decl.get("bound")
+        if decl_bound is not None and abs(_f(decl_bound) - cap) > CENT:
+            problems.append(f"invariant-violated:{decl.get('id')}")
+            return
+        exceeds = _f(line["unit_price"]) > cap   # strict, matches floor._violation
     except (KeyError, TypeError, ValueError):
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
@@ -261,6 +286,12 @@ def _line_at(inv: dict, decl: dict):
     return line if isinstance(line, dict) else None
 
 
+def _scalar(x) -> bool:
+    """A hashable, set-safe scope value (filename/index/None) — never a bool,
+    dict, or list. Guards the coverage sets against hostile unhashable scopes."""
+    return isinstance(x, (str, int, type(None))) and not isinstance(x, bool)
+
+
 def _has_flag(inv: dict, kind: str, line_idx: int, relation_type: str | None = None) -> bool:
     flags = inv.get("flags")
     for f in flags if isinstance(flags, list) else []:
@@ -270,10 +301,20 @@ def _has_flag(inv: dict, kind: str, line_idx: int, relation_type: str | None = N
         # `False == 0` in Python — a bool line index must not match line 0.
         if isinstance(fl, bool) or fl != line_idx:
             continue
-        if relation_type is not None and f.get("relation_type") != relation_type:
+        if relation_type is not None and not _relation_matches(f, relation_type):
             continue
         return True
     return False
+
+
+def _relation_matches(flag: dict, relation_type: str) -> bool:
+    """Match a flag's relation. Prefers the structured `relation_type` field;
+    falls back to the detail string for receipts signed before that field
+    existed (backward-compat for early v3/invariants-v1 receipts)."""
+    rt = flag.get("relation_type")
+    if rt is not None:
+        return rt == relation_type
+    return relation_type in str(flag.get("detail", ""))
 
 
 def _applied_floor_max(line: dict):
