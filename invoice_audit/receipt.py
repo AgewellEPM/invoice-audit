@@ -108,7 +108,7 @@ def _recheck_file(obj, kind: str, problems: list, hashed: list | None = None) ->
         problems.append(f"{kind}-hash-changed:{p.name}")
 
 
-def verify_receipt(receipt: dict, rehash_inputs: bool = True,
+def verify_receipt(receipt: dict, rehash_inputs: bool = True, *,
                    _hashed: list | None = None) -> list[str]:
     """Return list of named problems; empty list == verified.
 
