@@ -292,10 +292,15 @@ def _check_invoice_reconcile(decl: dict, inv: dict, problems: list) -> None:
 # ── small helpers ─────────────────────────────────────────────────────────────
 
 def _f(x) -> float:
-    """Coerce a recorded number, rejecting bool (True/False are not money)."""
+    """Coerce a recorded number, rejecting bool (True/False are not money). An
+    over-large int (e.g. 10**1000000) overflows float — normalize that to
+    ValueError so every caller's existing handler fails it closed, never crashes."""
     if isinstance(x, bool):
         raise ValueError("bool is not a number")
-    return float(x)
+    try:
+        return float(x)
+    except OverflowError as e:
+        raise ValueError("number too large to coerce") from e
 
 
 def _line_at(inv: dict, decl: dict):
@@ -343,6 +348,6 @@ def _applied_floor_max(line: dict):
     if isinstance(field, dict):
         try:
             return (float(field["object"]), field.get("source"))
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return None
     return None

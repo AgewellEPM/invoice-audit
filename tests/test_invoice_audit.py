@@ -1893,6 +1893,27 @@ def test_unhashable_invoice_file_is_harmless_under_index_keying():
     assert "invariant-missing:invoice-reconcile:0" in probs
 
 
+def test_overlarge_number_operand_fails_closed_not_crash():
+    # MEDIUM (Codex r-gate 9): an int too large for float (10**1000000) as a floor
+    # cap or line number must fail closed, not raise OverflowError.
+    big = 10 ** 1000000
+    r = {"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+         "invoices": [{"file": "a.png", "statedTotalReconciles": False,
+                       "lines": [{"floor": {"appliedMaxUnitPrice": {"object": big}}}]}],
+         "expected": []}
+    probs = check_invariants(r)                          # must not raise
+    # Big cap -> no floor invariant emitted for the line, but coverage still names
+    # the missing arithmetic/reconcile surfaces. The key assertion: no crash.
+    assert "invariant-missing:invoice-reconcile:0" in probs
+    # And as an operand in the arithmetic check it fails closed to unresolvable.
+    r2 = {"schema": "perslis.invoice-audit-receipt.v2",
+          "invoices": [{"file": "a.png", "statedTotalReconciles": False,
+                        "lines": [{"qty": big, "unit_price": 1, "line_total": 1}]}],
+          "expected": [{"id": "line-arithmetic:0:0", "kind": "line-arithmetic",
+                        "scope": {"invoiceIndex": 0, "line": 0}}]}
+    assert "invariant-unresolvable:line-arithmetic:0:0" in check_invariants(r2)
+
+
 def test_hostile_unhashable_line_in_coverage_fails_closed_not_crash():
     # MEDIUM (Codex r-gate 8): an unhashable scope.line (dict) must not raise on
     # the coverage set-add — fail closed via the per-declaration loop.
