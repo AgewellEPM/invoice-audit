@@ -143,11 +143,24 @@ are already real and tested. We extend this node; we do not invent a new one.
 
 ## Build order (do not skip, do not rush)
 
-1. ✅ **DONE** — **Symbolic layer emits an `expected` invariant block** into the
-   receipt (`invariants.py`, schema v3); `verify` re-proves it and graduates from
-   "hashes match" to "invariants hold." A re-signed tamper is caught by the
-   invariant even though the forged signature is valid. Three kinds pinned:
-   line-arithmetic, invoice-reconcile, floor-max-unit-price.
+1. ✅ **DONE — MONEY PATH CLOSED** (adversarially verified, 14 review rounds).
+   The symbolic layer emits an `expected` invariant block into the receipt
+   (`invariants.py`, schema v3); `verify` re-proves it and graduates from "hashes
+   match" to "invariants hold." A re-signed tamper is caught even though the
+   forged signature is valid. Four invariant kinds:
+   - **line-arithmetic** — pins qty/unit_price/line_total (exact) + the
+     mismatch-flag ⟺ arithmetic identity.
+   - **invoice-reconcile** — pins stated_total (exact) + the reconcile verdict.
+   - **floor-max-unit-price** — cross-checks the taught cap (exact) + veto ⟺
+     over-max, per covered line (pass or veto).
+   - **totals-consistency** — recomputes counts + money totals
+     (potential/market/policy overcharge) from the pinned invoices.
+   Every **money-affecting** field is now re-derived or pinned-and-cross-checked:
+   no single-field money tamper survives a re-sign. The remaining residual is the
+   **consistent multi-field forgery** (a value AND its pinned copy changed
+   together) — which is exactly what step 3 (re-derivation from the hashed
+   source) closes. All non-money / provenance fields (categoryEvidence, grounding
+   evidence, dataQuality, OCR substrate) are also step-3 territory.
 2. **Observer** reads ACTUAL state and reports EXPECTED≠ACTUAL as named
    contradictions (reuse the reason-code discipline).
 3. **Dependency graph** (TMS): edges between beliefs; a changed node marks only
