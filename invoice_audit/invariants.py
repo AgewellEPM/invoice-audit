@@ -106,16 +106,27 @@ def check_invariants(receipt: dict) -> list[str]:
     if requires and not invoices:
         return ["invariant-missing:invoices-stripped"]
 
-    # Only scalar file keys — an unhashable `file` (fuzz / schema mismatch) must
-    # not raise on dict-build or on the `in` set tests below. Non-scalar-file
-    # invoices are named unresolvable in _check_coverage, never silently dropped.
-    by_file = {inv.get("file"): inv for inv in invoices
-               if isinstance(inv, dict) and _scalar(inv.get("file"))}
+    # Group invoices by file. Only scalar file keys — an unhashable `file` (fuzz /
+    # schema mismatch) must not raise on dict-build or on the `in` tests below.
+    # Duplicate filenames are NEVER legitimate (each scan is a distinct file) and
+    # would let a `dict` silently keep only the last, masking a tampered earlier
+    # invoice — so collisions are recorded and fail closed, not last-wins.
+    by_file: dict = {}
+    dup_files: set = set()
+    for inv in invoices:
+        if not isinstance(inv, dict) or not _scalar(inv.get("file")):
+            continue
+        f = inv.get("file")
+        if f in by_file:
+            dup_files.add(f)
+        by_file[f] = inv
+    for f in sorted(dup_files, key=lambda x: (x is None, str(x))):
+        problems.append(f"invariant-unresolvable:duplicate-invoice-file:{f}")
 
     # Anti-strip: every invoice must be covered by a reconcile invariant and every
     # line by an arithmetic one. A removed declaration is a stripped invariant.
     if requires:
-        _check_coverage(declared, invoices, problems)
+        _check_coverage(declared, invoices, problems, dup_files)
 
     for decl in declared:
         if not isinstance(decl, dict):
@@ -123,6 +134,10 @@ def check_invariants(receipt: dict) -> list[str]:
             continue
         scope = decl.get("scope")
         if not isinstance(scope, dict) or not _scalar(scope.get("invoice")):
+            problems.append(f"invariant-unresolvable:{decl.get('id')}")
+            continue
+        # A duplicated filename cannot resolve to ONE invoice — don't guess.
+        if scope.get("invoice") in dup_files:
             problems.append(f"invariant-unresolvable:{decl.get('id')}")
             continue
         inv = by_file.get(scope.get("invoice"))
@@ -157,10 +172,12 @@ def _claims_content(receipt: dict) -> bool:
     return False
 
 
-def _check_coverage(declared: list, invoices: list, problems: list) -> None:
+def _check_coverage(declared: list, invoices: list, problems: list,
+                    dup_files: set) -> None:
     """Every invoice needs a reconcile invariant; every line an arithmetic one;
     every line under a taught max a floor invariant. A missing one means the
-    block was stripped after audit — fail closed, named per surface."""
+    block was stripped after audit — fail closed, named per surface. Duplicate-
+    filename invoices are already named unresolvable by the caller — skip them."""
     reconcile = set()
     arithmetic = set()
     floor_max = set()
@@ -187,6 +204,8 @@ def _check_coverage(declared: list, invoices: list, problems: list) -> None:
             # Unhashable/hostile file key — cannot key it into coverage sets.
             problems.append("invariant-unresolvable:malformed-invoice-file")
             continue
+        if file in dup_files:
+            continue  # already named unresolvable by the caller
         if file not in reconcile:
             problems.append(f"invariant-missing:invoice-reconcile:{file}")
         lines = inv.get("lines")

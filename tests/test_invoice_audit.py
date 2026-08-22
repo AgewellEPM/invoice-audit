@@ -1852,6 +1852,23 @@ def test_unknown_invariants_version_fails_closed():
     assert any(p.startswith("invariant-unresolvable:expected-version") for p in probs)
 
 
+def test_duplicate_invoice_file_masks_nothing_fails_closed():
+    # HIGH (Codex r-gate 6): two invoices sharing a filename must not let the last
+    # silently mask a tampered earlier one — fail closed on the collision.
+    tampered = {"file": "dup.png", "stated_total": 999.0, "statedTotalReconciles": True,
+                "lines": [{"qty": 1, "unit_price": 10.0, "line_total": 10.0}], "flags": []}
+    clean = {"file": "dup.png", "stated_total": 10.0, "statedTotalReconciles": True,
+             "lines": [{"qty": 1, "unit_price": 10.0, "line_total": 10.0}], "flags": []}
+    r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+                      "scans": [], "pricebook": {},
+                      "invoices": [tampered, clean],
+                      "expected": build_invariants([tampered, clean])})
+    probs = verify_receipt(r, rehash_inputs=False)
+    assert "invariant-unresolvable:duplicate-invoice-file:dup.png" in probs
+    # And it is NOT a clean pass (the tampered invoice is not masked away).
+    assert not verify_primitive(r, rehash_inputs=False).ok
+
+
 def test_unhashable_invoice_file_key_fails_closed_not_crash():
     # MEDIUM (Codex r-gate 5): an unhashable invoice `file` must not crash the
     # by_file build or the coverage `in` tests — fail closed to a named reason.
