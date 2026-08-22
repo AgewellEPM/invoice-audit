@@ -1895,6 +1895,23 @@ def test_unhashable_invoice_file_is_harmless_under_index_keying():
     assert "invariant-missing:invoice-reconcile:0" in probs
 
 
+def test_operand_pin_is_exact_catches_subcent_tamper():
+    # HIGH (Codex r-gate 11): the pin is EXACT, not within-CENT. A sub-cent
+    # single-field tamper on a flagged line must still be caught.
+    inv = {"file": "a.png", "stated_total": None, "statedTotalReconciles": False,
+           "lines": [{"qty": 2.0, "unit_price": 10.0, "line_total": 25.0}],
+           "flags": [{"kind": "arithmetic-mismatch", "line": 0}]}
+    r = sign_receipt({"schema": SCHEMA, "expectedVersion": INVARIANTS_VERSION,
+                      "scans": [], "pricebook": {}, "invoices": [inv],
+                      "expected": build_invariants([inv])})
+    assert verify_receipt(r, rehash_inputs=False) == []
+    # qty tamper of 0.004 — within the old CENT band, must now be caught.
+    forged = _resign(r, lambda b: b["invoices"][0]["lines"][0].__setitem__("qty", 2.004))
+    probs = verify_receipt(forged, rehash_inputs=False)
+    assert "receipt-signature-invalid" not in probs
+    assert "invariant-violated:line-arithmetic:0:0" in probs
+
+
 def test_operand_pin_catches_tamper_on_already_flagged_line():
     # HIGH (Codex r-gate 10): a re-signed tamper on an ALREADY-flagged line (whose
     # boolean mismatch verdict does not move) must still be caught — the pinned

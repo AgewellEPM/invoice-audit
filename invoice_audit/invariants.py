@@ -229,10 +229,12 @@ def _check_line_arithmetic(decl: dict, inv: dict, problems: list) -> None:
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
     try:
-        # The pinned operands must match the line — catches a single-field tamper
-        # even on an already-flagged line (boolean verdict alone wouldn't move).
+        # The pinned operands must match the line EXACTLY — they are copies of the
+        # same signed values, so any difference (even sub-cent) is a tamper. A
+        # tolerance here would let a within-CENT single-field tamper slip past on
+        # an already-flagged line whose boolean verdict wouldn't move.
         for key in ("qty", "unit_price", "line_total"):
-            if abs(_f(line[key]) - _f(operands[key])) > CENT:
+            if _f(line[key]) != _f(operands[key]):
                 problems.append(f"invariant-violated:{decl.get('id')}")
                 return
         computed_ok = abs(round(_f(line["qty"]) * _f(line["unit_price"]), 2)
@@ -305,7 +307,7 @@ def _check_invoice_reconcile(decl: dict, inv: dict, problems: list) -> None:
         if (stated is None) != (pinned is None):
             problems.append(f"invariant-violated:{decl.get('id')}")
             return
-        if stated is not None and abs(_f(stated) - _f(pinned)) > CENT:
+        if stated is not None and _f(stated) != _f(pinned):   # exact: pinned copy
             problems.append(f"invariant-violated:{decl.get('id')}")
             return
         lines = inv.get("lines")
