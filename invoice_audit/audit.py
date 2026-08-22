@@ -109,6 +109,9 @@ def audit_folder(scans_dir: Path, pricebook_path: Path,
             if floor_check["veto"]:
                 for c in floor_check["conflicts"]:
                     flags.append({"kind": "floor-veto", "line": i,
+                                  # Structured so the receipt's floor invariant can
+                                  # match the SPECIFIC relation, not any veto.
+                                  "relation_type": c["relation_type"],
                                   "detail": f"{c['detail']} "
                                             f"[{c['relation_type']} "
                                             f"src={c['source']}]"})

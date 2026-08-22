@@ -85,11 +85,13 @@ def check_invariants(receipt: dict) -> list[str]:
     problems: list[str] = []
     invoices = receipt.get("invoices")
     invoices = invoices if isinstance(invoices, list) else []
-    # A current-schema receipt with audited content MUST carry invariants that
-    # cover it. `requires` is False for a contentless receipt (nothing to prove)
-    # and for older (pre-invariants) schemas. This is what stops a strip-and-
-    # resign bypass while letting a genuinely empty receipt through.
-    requires = receipt.get("schema") in _INVARIANT_SCHEMAS and bool(invoices)
+    # A current-schema receipt that CLAIMS audited content MUST carry invariants
+    # that cover it. Content is claimed by invoices, a review queue, OR non-zero
+    # totals — so stripping `invoices` while keeping `totals` (which still asserts
+    # findings) cannot dodge the requirement. `requires` is False only for a
+    # genuinely vacuous receipt and for older (pre-invariants) schemas.
+    requires = (receipt.get("schema") in _INVARIANT_SCHEMAS
+                and _claims_content(receipt))
     declared = receipt.get("expected")
     if declared is None:
         return ["invariant-missing:expected-block-absent"] if requires else []
@@ -127,19 +129,39 @@ def check_invariants(receipt: dict) -> list[str]:
     return problems
 
 
+def _claims_content(receipt: dict) -> bool:
+    """True iff the receipt asserts audited findings — via invoices, a review
+    queue, or non-zero totals. Used to demand invariants even if `invoices` was
+    stripped while a content-claiming surface (totals) was kept."""
+    if receipt.get("invoices") or receipt.get("reviewQueue"):
+        return True
+    totals = receipt.get("totals")
+    if isinstance(totals, dict):
+        for k in ("invoices", "linesChecked", "flagged"):
+            v = totals.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                return True
+    return False
+
+
 def _check_coverage(declared: list, invoices: list, problems: list) -> None:
-    """Every invoice needs a reconcile invariant; every line an arithmetic one.
-    A missing one means the block was stripped after audit — fail closed."""
+    """Every invoice needs a reconcile invariant; every line an arithmetic one;
+    every line under a taught max a floor invariant. A missing one means the
+    block was stripped after audit — fail closed, named per surface."""
     reconcile = set()
     arithmetic = set()
+    floor_max = set()
     for d in declared:
         if not isinstance(d, dict):
             continue
         scope = d.get("scope") if isinstance(d.get("scope"), dict) else {}
-        if d.get("kind") == "invoice-reconcile":
+        kind = d.get("kind")
+        if kind == "invoice-reconcile":
             reconcile.add(scope.get("invoice"))
-        elif d.get("kind") == "line-arithmetic":
+        elif kind == "line-arithmetic":
             arithmetic.add((scope.get("invoice"), scope.get("line")))
+        elif kind == "floor-max-unit-price":
+            floor_max.add((scope.get("invoice"), scope.get("line")))
     for inv in invoices:
         if not isinstance(inv, dict):
             continue
@@ -147,9 +169,13 @@ def _check_coverage(declared: list, invoices: list, problems: list) -> None:
         if file not in reconcile:
             problems.append(f"invariant-missing:invoice-reconcile:{file}")
         lines = inv.get("lines")
-        for i in range(len(lines) if isinstance(lines, list) else 0):
+        for i, line in enumerate(lines if isinstance(lines, list) else []):
             if (file, i) not in arithmetic:
                 problems.append(f"invariant-missing:line-arithmetic:{file}:{i}")
+            # A line the floor covers with a max MUST carry its floor invariant —
+            # else a stripped floor declaration would bypass verification.
+            if _applied_floor_max(line) is not None and (file, i) not in floor_max:
+                problems.append(f"invariant-missing:floor-max-unit-price:{file}:{i}")
 
 
 def _check_line_arithmetic(decl: dict, inv: dict, problems: list) -> None:
@@ -184,8 +210,10 @@ def _check_floor_max(decl: dict, inv: dict, problems: list) -> None:
     except (KeyError, TypeError, ValueError):
         problems.append(f"invariant-unresolvable:{decl.get('id')}")
         return
-    vetoed = _has_flag(inv, "floor-veto", idx)
-    # A floor-veto is recorded iff the unit price actually exceeds the taught max.
+    # Match ONLY a max_unit_price veto — a floor-veto for a different relation
+    # (qty_integer, min_unit_price, …) on this line must not be read as the max
+    # veto, or it would falsely (mis)match the exceeds-max computation.
+    vetoed = _has_flag(inv, "floor-veto", idx, relation_type="max_unit_price")
     if exceeds != vetoed:
         problems.append(f"invariant-violated:{decl.get('id')}")
 
@@ -233,11 +261,18 @@ def _line_at(inv: dict, decl: dict):
     return line if isinstance(line, dict) else None
 
 
-def _has_flag(inv: dict, kind: str, line_idx: int) -> bool:
+def _has_flag(inv: dict, kind: str, line_idx: int, relation_type: str | None = None) -> bool:
     flags = inv.get("flags")
     for f in flags if isinstance(flags, list) else []:
-        if isinstance(f, dict) and f.get("kind") == kind and f.get("line") == line_idx:
-            return True
+        if not isinstance(f, dict) or f.get("kind") != kind:
+            continue
+        fl = f.get("line")
+        # `False == 0` in Python — a bool line index must not match line 0.
+        if isinstance(fl, bool) or fl != line_idx:
+            continue
+        if relation_type is not None and f.get("relation_type") != relation_type:
+            continue
+        return True
     return False
 
 

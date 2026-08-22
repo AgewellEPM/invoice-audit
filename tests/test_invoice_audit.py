@@ -1710,6 +1710,74 @@ def test_check_invariants_total_on_hostile_container_shapes():
     assert "invariant-unresolvable:s" in probs                    # non-dict scope
 
 
+def test_stripped_invoices_but_kept_totals_still_requires_invariants():
+    # HIGH (Codex r-gate 2): stripping `invoices` while keeping `totals` that
+    # still CLAIM findings must not dodge the invariant requirement.
+    forged = {"schema": SCHEMA,
+              "totals": {"invoices": 3, "linesChecked": 7, "flagged": 2}}
+    assert "invariant-missing:expected-block-absent" in check_invariants(forged)
+    # But a genuinely vacuous current-schema receipt claims nothing -> nothing due.
+    assert check_invariants({"schema": SCHEMA}) == []
+    assert check_invariants({"schema": SCHEMA, "totals": {"linesChecked": 0}}) == []
+
+
+def test_stripped_floor_declaration_named_missing():
+    # HIGH (Codex r-gate 2): a line under a taught max whose floor-max declaration
+    # was removed must be named missing, not silently uncovered.
+    line = {"qty": 1, "unit_price": 50.0, "line_total": 50.0,
+            "floor": {"appliedMaxUnitPrice": {"object": 60.0, "source": "ops"}}}
+    r = {"schema": SCHEMA,
+         "invoices": [{"file": "a.png", "lines": [line], "statedTotalReconciles": False}],
+         "expected": [
+             {"id": "line-arithmetic:a.png:0", "kind": "line-arithmetic",
+              "scope": {"invoice": "a.png", "line": 0}},
+             {"id": "invoice-reconcile:a.png", "kind": "invoice-reconcile",
+              "scope": {"invoice": "a.png"}},
+             # floor-max-unit-price deliberately omitted
+         ]}
+    assert "invariant-missing:floor-max-unit-price:a.png:0" in check_invariants(r)
+
+
+def test_floor_invariant_matches_max_veto_only_not_other_relations():
+    # MEDIUM (Codex r-gate 2): a floor-veto for a DIFFERENT relation (qty_integer)
+    # must not be read as the max veto.
+    covered = {"qty": 1, "unit_price": 50.0, "line_total": 50.0,   # 50 <= 60: passes max
+               "floor": {"appliedMaxUnitPrice": {"object": 60.0, "source": "ops"}}}
+    decl = [{"id": "floor-max-unit-price:a.png:0", "kind": "floor-max-unit-price",
+             "scope": {"invoice": "a.png", "line": 0}, "bound": 60.0}]
+    # v2 schema so coverage strictness doesn't demand the other declarations.
+    holds = {"schema": "perslis.invoice-audit-receipt.v2",
+             "invoices": [{"file": "a.png", "lines": [covered],
+                           "statedTotalReconciles": False,
+                           "flags": [{"kind": "floor-veto", "line": 0,
+                                      "relation_type": "qty_integer"}]}],
+             "expected": decl}
+    assert not any("floor-max" in p for p in check_invariants(holds))   # not falsely flagged
+    # Over the max, but only a qty veto remains (max veto suppressed) -> violated.
+    over = dict(covered, unit_price=100.0, line_total=100.0)
+    forged = {"schema": "perslis.invoice-audit-receipt.v2",
+              "invoices": [{"file": "a.png", "lines": [over],
+                            "statedTotalReconciles": False,
+                            "flags": [{"kind": "floor-veto", "line": 0,
+                                       "relation_type": "qty_integer"}]}],
+              "expected": decl}
+    assert "invariant-violated:floor-max-unit-price:a.png:0" in check_invariants(forged)
+
+
+def test_flag_bool_line_index_not_counted_as_line_zero():
+    # MEDIUM (Codex r-gate 2): {"line": False} must NOT satisfy line 0's recorded
+    # verdict (False == 0 in Python). Line 0 is genuinely mis-arithmetic'd here,
+    # so with the bogus flag ignored the invariant is violated (no real flag).
+    line = {"qty": 2.0, "unit_price": 3.0, "line_total": 5.0}      # 6 != 5
+    r = {"schema": "perslis.invoice-audit-receipt.v2",
+         "invoices": [{"file": "a.png", "lines": [line],
+                       "statedTotalReconciles": False,
+                       "flags": [{"kind": "arithmetic-mismatch", "line": False}]}],
+         "expected": [{"id": "line-arithmetic:a.png:0", "kind": "line-arithmetic",
+                       "scope": {"invoice": "a.png", "line": 0}}]}
+    assert "invariant-violated:line-arithmetic:a.png:0" in check_invariants(r)
+
+
 def test_verify_primitive_provenance_reports_invariants_held():
     r = _demo_receipt()
     res = verify_primitive(r, rehash_inputs=False)
